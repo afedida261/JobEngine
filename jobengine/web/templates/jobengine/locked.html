@@ -1,0 +1,2 @@
+{% extends 'jobengine/base.html' %}{% load interface %}
+{% block content %}<div class="page-heading"><div><span class="flow-label">YOUR SEARCH PLAN</span><h1>A direction.<br><span>Built around you.</span></h1></div></div><section class="panel empty-state spacious"><h2>Let’s start with your background.</h2><p>Your experience and preferences will shape the plan you approve before searching.</p><a href="{{ continue_url }}" class="button primary">{% if current %}Continue setup{% else %}Get started{% endif %}{% icon 'arrow' %}</a></section>{% endblock %}

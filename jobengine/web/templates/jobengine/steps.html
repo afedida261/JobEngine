@@ -1,0 +1,1 @@
+<ol class="stepper" aria-label="Your onboarding progress">{% for step in steps %}<li class="{% if step.done %}complete{% elif step.active %}active{% endif %}" {% if step.active %}aria-current="step"{% endif %}><span class="step-number">{% if step.done %}✓{% else %}{{ step.number }}{% endif %}</span><span>{{ step.label }}</span></li>{% endfor %}</ol>

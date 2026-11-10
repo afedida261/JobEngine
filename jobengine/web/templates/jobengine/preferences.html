@@ -1,0 +1,12 @@
+{% extends 'jobengine/base.html' %}{% load interface %}
+{% block content %}
+<section class="preferences-screen {% if onboarding %}flow-screen{% endif %}">
+  {% if not onboarding %}<a class="back-link" href="{% url 'profile' %}">{% icon 'arrow_left' %}Your profile</a>{% endif %}
+  <div class="flow-heading"><span class="flow-label">{% if onboarding %}BEFORE WE TALK{% else %}YOUR PREFERENCES{% endif %}</span><h1>Work should fit<br><span>your life.</span></h1><p>A few practical details. Keep everything else open.</p></div>
+  <form class="preferences-form" method="post" data-busy-form>
+    {% csrf_token %}<input type="hidden" name="revision" value="{{ record.revision }}">{{ form.non_field_errors }}
+    {% include 'jobengine/preferences_fields.html' %}
+    <div class="form-actions"><button class="button primary" type="submit">{% if onboarding %}Let’s talk{% else %}Save preferences{% endif %}{% icon 'arrow' %}</button><span>{% if onboarding %}Your background is saved.{% else %}Changes require a new profile and plan approval.{% endif %}</span></div>
+  </form>
+</section>
+{% endblock %}

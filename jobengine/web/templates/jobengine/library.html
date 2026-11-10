@@ -1,0 +1,15 @@
+{% extends 'jobengine/base.html' %}{% load interface %}
+{% block content %}<div class="page-heading"><div><p class="eyebrow">YOUR WORKSPACE</p><h1>Pick up where <em>you left off.</em></h1><p>Your saved stories and the directions you're exploring.</p></div><form method="post" action="{% url 'new_profile' %}">{% csrf_token %}<button class="button secondary">{% icon 'plus' %}Start a fresh profile</button></form></div>
+{% if candidates %}<div class="library-grid">{% for candidate in candidates %}<article class="panel library-card"><span class="icon-tile">{% icon 'profile' %}</span><span class="pill">{{ candidate.session.stage|title }}</span><h2>{{ candidate.session.documents.0.label }}</h2><p>{{ candidate.session.analysis.summary|truncatechars:200 }}</p><small>Last saved {{ candidate.updated_at|slice:':16' }} · {{ candidate.session.history|length }} answers</small><form method="post">{% csrf_token %}<input type="hidden" name="candidate" value="{{ candidate.session.id }}"><button class="button secondary" type="submit">Continue this profile {% icon 'arrow' %}</button></form></article>{% endfor %}</div>{% else %}<div class="panel empty-state"><span class="empty-icon">{% icon 'folder' %}</span><h2>Your story has a home here.</h2><p>Start a profile and your progress will be saved as you go. This workspace belongs to this browser.</p><a class="button primary" href="{% url 'start' %}">Start your story {% icon 'arrow' %}</a></div>{% endif %}
+{% if legacy %}<details class="panel legacy-library"><summary>Bring over a profile from the previous local app</summary><p class="muted">These profiles are already saved on this computer. Importing connects a profile and its most recent run to this browser's workspace. Original records and approvals are preserved. This option is available only on this computer in development mode.</p>{% for candidate in legacy %}<form class="legacy-row" method="post">{% csrf_token %}<input type="hidden" name="action" value="import"><input type="hidden" name="candidate" value="{{ candidate.session.id }}"><span>{{ candidate.session.documents.0.label }}<small>{{ candidate.updated_at|slice:':16' }} · {{ candidate.session.stage }}</small></span><button class="button secondary">Import profile {% icon 'arrow' %}</button></form>{% endfor %}</details>{% endif %}
+<details class="panel restore-panel" {% if restore_open %}open{% endif %}>
+  <summary>Restore from a progress backup</summary>
+  <p class="muted">Bring your saved story into this browser. You'll review your profile and approve a new search plan. This also accepts progress exports from the previous Streamlit app.</p>
+  <form method="post" action="{% url 'restore' %}" enctype="multipart/form-data">
+    {% csrf_token %}
+    {{ restore_form.non_field_errors }}
+    {% include 'jobengine/field.html' with field=restore_form.backup %}
+    <button class="button secondary" type="submit">Restore my progress {% icon 'upload' %}</button>
+  </form>
+</details>
+{% endblock %}

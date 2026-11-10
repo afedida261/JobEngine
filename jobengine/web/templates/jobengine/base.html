@@ -1,0 +1,43 @@
+{% load static interface %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="A job search built around you.">
+  <title>{{ page_title }} · JobEngine</title>
+  <link rel="icon" href="{% static 'jobengine/favicon.svg' %}" type="image/svg+xml">
+  <link rel="stylesheet" href="{% static 'jobengine/app.css' %}?v=interview-13">
+  <script src="{% static 'jobengine/app.js' %}?v=interview-13" defer></script>
+</head>
+<body class="{% if focus_mode %}focus-mode{% else %}workspace-mode{% endif %}{% if landing_page %} landing-page{% endif %}{% if request.resolver_match.url_name == 'interview' %} interview-page{% endif %}">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="app-header">
+    {% include 'jobengine/landing_logo.html' %}
+    {% if dashboard_available %}
+    <details class="navigation-menu" data-navigation>
+      <summary aria-label="Open navigation" aria-expanded="false" aria-controls="workspace-navigation">{% icon 'menu' %}</summary>
+      <nav id="workspace-navigation" aria-label="Your workspace">
+        <span class="menu-caption">Your workspace</span>
+        <a href="{% url 'overview' %}" {% if nav == 'overview' %}aria-current="page"{% endif %}>{% icon 'overview' %}Dashboard</a>
+        <a href="{% url 'profile' %}" {% if nav == 'profile' %}aria-current="page"{% endif %}>{% icon 'profile' %}Your profile</a>
+        <a href="{% url 'opportunities' %}" {% if nav == 'opportunities' %}aria-current="page"{% endif %}>{% icon 'search' %}Suggested opportunities</a>
+        <a href="{% url 'saved' %}" {% if nav == 'saved' %}aria-current="page"{% endif %}>{% icon 'bookmark' %}Saved roles<span>{{ bookmark_count }}</span></a>
+        <a href="{% url 'applied' %}" {% if nav == 'applied' %}aria-current="page"{% endif %}>{% icon 'check' %}Applied roles<span>{{ application_count }}</span></a>
+        <a href="{% url 'plan' %}" {% if nav == 'plan' %}aria-current="page"{% endif %}>{% icon 'plan' %}Search plan</a>
+        <div class="menu-divider"></div>
+        <a href="{% url 'library' %}">{% icon 'folder' %}Profiles & backups</a>
+        <a href="{% url 'settings' %}">{% icon 'settings' %}Settings & privacy</a>
+      </nav>
+    </details>
+    {% endif %}
+  </header>
+  <main id="main" tabindex="-1">
+    {% if active_task and not focus_mode %}<a class="activity-banner" href="{% url 'activity' active_task.id %}"><span class="small-spinner"></span>Your agent is working.<span>View progress {% icon 'arrow' %}</span></a>{% endif %}
+    {% if messages and request.resolver_match.url_name != 'interview' %}<div class="messages" aria-live="polite">{% for message in messages %}<div class="notice {{ message.tags }}">{{ message }}</div>{% endfor %}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  {% if not focus_mode %}<footer class="page-footer"><span>A search built around you.</span><a href="{% url 'settings' %}">Privacy & connection</a></footer>{% endif %}
+</body>
+</html>

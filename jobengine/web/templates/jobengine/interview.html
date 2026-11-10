@@ -1,0 +1,18 @@
+﻿{% extends 'jobengine/base.html' %}{% load interface %}
+{% block content %}
+<section class="interview-deck flow-screen" data-interview data-question-number="{{ record.session.history|length|add:1 }}" data-question-limit="{% if record.session.interview_mode == 'guided' %}4{% else %}{{ max_questions }}{% endif %}" {% if pending_task %}data-pending-task="{% url 'activity' pending_task.id %}?format=json" data-pending-activity="{% url 'activity' pending_task.id %}"{% endif %}>
+  <div class="interview-notices" role="status">{% for message in messages %}<div class="notice {{ message.tags }}">{{ message }}</div>{% endfor %}{% if record.session.notice %}<div class="notice">{{ record.session.notice }}</div>{% endif %}</div>
+  <div class="interview-track" aria-hidden="true"><span data-question-progress></span></div>
+  {% if question %}
+  <article class="question-slide current-slide" data-current>
+    <h1 tabindex="-1">{{ question.question }}</h1>
+    <form class="interview-answer" action="{% url 'interview' %}" method="post" data-answer-form>
+      {% csrf_token %}<input type="hidden" name="revision" value="{{ record.revision }}">
+      <div class="composer answer-composer"><label class="sr-only" for="answer">Your answer</label><textarea id="answer" name="answer" rows="5" maxlength="8000" aria-describedby="answer-status" placeholder="Share what comes to mind…" {% if pending_task %}readonly{% endif %}>{{ answer }}</textarea></div>
+      <div class="question-submit"><button class="button primary interview-continue" name="action" value="answer" type="submit" {% if pending_task %}disabled{% endif %}>Continue {% icon 'arrow' %}</button></div>
+      <span class="answer-status" id="answer-status" data-answer-status aria-live="polite">{% if pending_task %}Preparing your next question…{% endif %}</span>
+    </form>
+  </article>
+  {% endif %}
+</section>
+{% endblock %}

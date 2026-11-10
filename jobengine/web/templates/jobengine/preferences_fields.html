@@ -1,0 +1,53 @@
+<div class="form-section first-section">
+  <div class="section-number">01</div>
+  <div class="section-content">
+    <h2>Where work fits into your life</h2>
+    <p class="muted">A country to guide the search. The rest can stay open.</p>
+    {% include 'jobengine/field.html' with field=form.authorization_country %}
+    {% include 'jobengine/field.html' with field=form.work_arrangements %}
+    {% include 'jobengine/field.html' with field=form.locations %}
+    <details class="optional-details" {% if form.errors %}open{% endif %}>
+      <summary>Remote work & relocation preferences</summary>
+      {% include 'jobengine/field.html' with field=form.remote_countries %}
+      {% include 'jobengine/field.html' with field=form.relocation %}
+    </details>
+  </div>
+</div>
+<div class="form-section">
+  <div class="section-number">02</div>
+  <div class="section-content">
+    <h2>The practical details</h2>
+    <p class="muted">It's okay to be unsure. We won't fill in the blanks for you.</p>
+    {% include 'jobengine/field.html' with field=form.authorized_to_work %}
+    <div class="form-grid">
+      {% include 'jobengine/field.html' with field=form.sponsorship_now %}
+      {% include 'jobengine/field.html' with field=form.sponsorship_future %}
+    </div>
+    <details class="optional-details" {% if form.errors %}open{% endif %}>
+      <summary>Availability & education details</summary>
+      {% include 'jobengine/field.html' with field=form.graduation_status %}
+      <div class="form-grid" data-graduation-fields>
+        {% include 'jobengine/field.html' with field=form.graduation_month %}
+        {% include 'jobengine/field.html' with field=form.graduation_year %}
+      </div>
+      {% include 'jobengine/field.html' with field=form.start_mode %}
+      <div data-start-date>{% include 'jobengine/field.html' with field=form.start_date %}</div>
+    </details>
+  </div>
+</div>
+<div class="form-section">
+  <div class="section-number">03</div>
+  <div class="section-content">
+    <h2>Any non-negotiables?</h2>
+    <p class="muted">Optional. Only add firm requirements here.</p>
+    <details class="optional-details" {% if form.errors %}open{% endif %}>
+      <summary>Set a minimum compensation</summary>
+      {% include 'jobengine/field.html' with field=form.minimum_compensation %}
+      <div class="form-grid">
+        {% include 'jobengine/field.html' with field=form.currency %}
+        {% include 'jobengine/field.html' with field=form.compensation_basis %}
+      </div>
+    </details>
+    {% include 'jobengine/field.html' with field=form.other_exclusions %}
+  </div>
+</div>
