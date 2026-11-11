@@ -1,3 +1,5 @@
+import pytest
+
 from jobengine.grounding import sanitize_job_facts, validate_facts
 from jobengine.search.ranking import rank_job
 
@@ -52,36 +54,42 @@ def test_untraceable_availability_is_unknown_while_requirements_remain_valid(cas
     assert cleaned.requirements == facts.requirements
 
 
-def test_no_sponsorship_needed_does_not_require_employer_sponsorship(case, intake):
-    from jobengine.models import ConstraintAssessment, EmployerTerm
-    from jobengine.onboarding.preferences import intake_constraints
+def test_retired_constraints_cannot_reject_or_downgrade_jobs(case, intake):
+    from jobengine.models import ConstraintAssessment, Profile
 
     profile, item, page, facts, judgment = case
-    profile.intake, profile.constraints = intake, intake_constraints(intake)
-    page.text += " Work country: United States."
-    facts.terms = [EmployerTerm(field="work_country", value="United States", quote="United States")]
-    judgment.constraints = [
-        ConstraintAssessment(
-            constraint_id="C2",
-            status="unknown",
-            job_quote=None,
-            explanation="Employer does not mention sponsorship.",
-        )
+    original = rank_job(profile, item, page, facts, judgment)
+    saved = profile.model_dump(mode="json")
+    saved["intake"] = intake.model_dump(mode="json") | {
+        "authorized_to_work": "unknown",
+        "sponsorship_now": "yes",
+        "minimum_compensation": 999999,
+        "remote_countries": ["Canada"],
+    }
+    saved["constraints"] += [
+        {
+            "id": "C2",
+            "field": "Work authorization / sponsorship",
+            "value": "Needs sponsorship",
+            "hard": True,
+        },
+        {"id": "C4", "field": "Compensation", "value": "Minimum USD 999999", "hard": True},
     ]
-    result = rank_job(profile, item, page, facts, judgment)
-    assert next(c for c in result.judgment.constraints if c.constraint_id == "C2").status == "meets"
-    # Authorization is not evidence of citizenship or clearance.
-    facts.terms.append(
-        EmployerTerm(field="authorization", value="US citizenship required", quote="United States")
-    )
-    assert (
-        next(
-            c
-            for c in rank_job(profile, item, page, facts, judgment).judgment.constraints
-            if c.constraint_id == "C2"
-        ).status
-        == "unknown"
-    )
+    migrated = Profile.model_validate(saved)
+    for identity in ("C2", "C4"):
+        judgment.constraints.append(
+            ConstraintAssessment(
+                constraint_id=identity,
+                status="conflict",
+                job_quote="Python programming is required.",
+                explanation="Retired condition must not exclude this role.",
+            )
+        )
+    result = rank_job(migrated, item, page, facts, judgment)
+    assert result.category == original.category
+    assert result.score == original.score
+    assert {c.constraint_id for c in result.judgment.constraints} == {"C1"}
+    assert not migrated.confirmed and migrated.search_brief is None
 
 
 def test_evaluation_preserves_description_when_availability_is_ungrounded(
@@ -178,3 +186,40 @@ def test_job_at_a_different_company_cannot_inherit_the_researched_sector(
             return facts
 
     assert pipeline.evaluate(Client(), profile, item).category == "unverified"
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_nyc_constraint_excludes_california_office_but_allows_remote_from_nyc(case, remote):
+    from jobengine.models import ConstraintAssessment, EmployerTerm, IntakePreferences
+    from jobengine.onboarding.preferences import intake_constraints
+
+    profile, item, page, facts, judgment = case
+    profile.intake = IntakePreferences(
+        graduation_status="not_applicable",
+        locations=["NYC"],
+        work_arrangements=["on_site", "hybrid", "remote"],
+    )
+    profile.constraints = intake_constraints(profile.intake)
+    quote = (
+        "This California employer allows remote work from New York City."
+        if remote
+        else "This role requires working in our San Francisco office three days per week."
+    )
+    page.text += " " + quote
+    facts.terms.append(EmployerTerm(field="location", value=quote, quote=quote))
+    judgment.constraints = [
+        ConstraintAssessment(
+            constraint_id="C1",
+            status="meets" if remote else "conflict",
+            job_quote=quote,
+            explanation=quote,
+        ),
+        ConstraintAssessment(
+            constraint_id="C3",
+            status="unknown",
+            job_quote=None,
+            explanation="Start date is flexible.",
+        ),
+    ]
+    result = rank_job(profile, item, page, facts, judgment)
+    assert result.category == ("strong" if remote else "excluded")

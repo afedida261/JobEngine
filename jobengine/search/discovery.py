@@ -4,6 +4,7 @@ import json
 import re
 from urllib.parse import urlsplit
 
+from jobengine.infrastructure.diagnostics import emit
 from jobengine.infrastructure.llm import ModelClient
 from jobengine.models import (
     CompanyCandidate,
@@ -52,7 +53,7 @@ def public_brief(profile: Profile) -> dict:
         "interests": profile.interests,
         "professional_years": profile.professional_years,
         "location_preferences": location,
-        "work_country": profile.intake.authorization_country if profile.intake else None,
+        "work_country": "United States",
         "search_objective": approved.summary,
         "work_themes": approved.work_themes,
         "relevant_experience": [s.statement for s in approved.strengths],
@@ -222,12 +223,27 @@ def discover(
     seen = set()
     jobs = []
     for item in result.jobs:
+        emit("discover", "candidate", item=item.model_dump(mode="json"))
         try:
             canonical = canonical_url(item.url)
         except ValueError:
+            emit(
+                "discover",
+                "rejected",
+                item=item.model_dump(mode="json"),
+                reason="Invalid result URL.",
+                skipped="retrieval, extraction, assessment",
+            )
             warnings.append("Discarded an invalid result URL.")
             continue
         if canonical not in allowed:
+            emit(
+                "discover",
+                "rejected",
+                item=item.model_dump(mode="json"),
+                reason="URL absent from search provenance.",
+                skipped="retrieval, extraction, assessment",
+            )
             warnings.append(f"Discarded a URL not present in search provenance: {canonical}")
         elif (
             profile.professional_years == 0
@@ -240,6 +256,13 @@ def discover(
                 r"\b(?:junior|new[\s-]*grad|entry[\s-]*level|early[\s-]*career)\b", item.title, re.I
             )
         ):
+            emit(
+                "discover",
+                "rejected",
+                item=item.model_dump(mode="json"),
+                reason="Existing zero-experience senior-title filter.",
+                skipped="retrieval, extraction, assessment",
+            )
             warnings.append(
                 f"Skipped an obviously senior search candidate for a zero-experience profile: {item.title} ({item.url})."
             )
@@ -251,6 +274,8 @@ def discover(
                 company.official_url,
             )
             seen.add(canonical)
+        else:
+            emit("discover", "skipped", item=item.model_dump(mode="json"), reason="Duplicate URL.")
     step = SearchStep(
         stage="jobs",
         sector=sector.name,

@@ -2,11 +2,13 @@
 
 ## Immediate next steps
 
-1. **Create the interactive testing interface**
+1. **Interactive testing interface — implemented**
 
-   Allow `jane-doe` to run through Terra in the terminal, save the resulting profile, and then run Sol independently. Save full transcripts, inputs, outputs, and failure reasons. Have a separate inspectable output for every stage: a run folder containing the search plan, all discovered URLs, fetch outcomes, extracted job requirements, qualification assessments, and an overall summary, rather than simply a `results.txt` listing jobs.
-
-   If 20 jobs are discovered but zero assessed, it should be possible to see exactly why without asking an AI to reconstruct the run afterward.
+   `python -m jobengine` now exposes named candidate registration, interactive Terra interviews,
+   profile review and plan approval, independent Sol searches, and saved-page evaluation. Every
+   command retains local run artifacts and explicit failures. See the
+   [terminal debugging guide](docs/terminal-debugging.md). Use it for the next handoff audit;
+   offline tests do not establish live search quality.
 
 2. **Audit the Terra-to-Sol handoff**
 

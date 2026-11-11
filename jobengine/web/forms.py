@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import re
+import uuid
 
 from django import forms
 from django.forms import formset_factory
 
 from jobengine.infrastructure.resumes import read_resume
-from jobengine.models import Document, GeneralInformation, IntakePreferences
+from jobengine.models import (
+    Document,
+    GeneralInformation,
+    IntakePreferences,
+    OnboardingAnalysis,
+    OnboardingSession,
+)
 from jobengine.onboarding.preferences import validate_intake
-
-CHOICES = [("unknown", "Not sure yet"), ("yes", "Yes"), ("no", "No")]
 
 
 def lines(value):
@@ -17,10 +22,6 @@ def lines(value):
 
 
 class PreferencesForm(forms.Form):
-    authorization_country = forms.CharField(label="Country where you plan to work", max_length=100)
-    authorized_to_work = forms.ChoiceField(label="Authorized to work there?", choices=CHOICES)
-    sponsorship_now = forms.ChoiceField(label="Need sponsorship now?", choices=CHOICES)
-    sponsorship_future = forms.ChoiceField(label="Need sponsorship in the future?", choices=CHOICES)
     work_arrangements = forms.MultipleChoiceField(
         label="Work arrangement",
         required=False,
@@ -29,21 +30,22 @@ class PreferencesForm(forms.Form):
         help_text="Leave all unchecked if you're open to any arrangement.",
     )
     locations = forms.CharField(
-        label="Preferred cities or regions",
+        label="Cities or regions for on-site / hybrid work",
         required=False,
         max_length=500,
-        help_text="Separate with commas. Leave blank to keep locations open.",
-    )
-    remote_countries = forms.CharField(
-        label="Countries you can work remotely from",
-        required=False,
-        max_length=500,
-        help_text="Separate with commas. Remote roles can still have country restrictions.",
+        help_text="Selected areas are limits. Remote work elsewhere must let you work from these areas. Leave blank to keep locations open.",
     )
     relocation = forms.ChoiceField(
         label="Open to relocating?",
-        choices=[("any", "No preference"), ("yes", "Yes"), ("no", "No")],
+        required=False,
+        initial="no",
+        choices=[("no", "No"), ("yes", "Yes, within my selected locations")],
+        help_text="Selected locations remain limits. Remote work does not require relocation.",
     )
+
+    def clean_relocation(self):
+        return self.cleaned_data["relocation"] or "no"
+
     graduation_status = forms.ChoiceField(
         label="Education status",
         choices=[
@@ -70,17 +72,6 @@ class PreferencesForm(forms.Form):
     start_date = forms.DateField(
         label="Earliest start date", required=False, widget=forms.DateInput(attrs={"type": "date"})
     )
-    minimum_compensation = forms.FloatField(
-        label="Minimum annual compensation",
-        min_value=1,
-        required=False,
-        help_text="Optional. A floor is treated as a requirement.",
-    )
-    currency = forms.CharField(label="Currency code", max_length=3, initial="USD", required=False)
-    compensation_basis = forms.ChoiceField(
-        label="Compensation basis",
-        choices=[("base", "Base salary"), ("total", "Total compensation")],
-    )
     other_exclusions = forms.CharField(
         label="Anything to avoid?",
         required=False,
@@ -95,7 +86,6 @@ class PreferencesForm(forms.Form):
             return {}
         values = intake.model_dump(mode="json")
         values["locations"] = ", ".join(intake.locations)
-        values["remote_countries"] = ", ".join(intake.remote_countries)
         return values
 
     def clean(self):
@@ -111,9 +101,9 @@ class PreferencesForm(forms.Form):
         payload = {
             name: cleaned[name] for name in IntakePreferences.model_fields if name in cleaned
         }
-        for name in ("locations", "remote_countries"):
-            payload[name] = [value.strip() for value in payload[name].split(",") if value.strip()]
-        payload["currency"] = (payload["currency"] or "USD").upper()
+        payload["locations"] = [
+            value.strip() for value in payload["locations"].split(",") if value.strip()
+        ]
         try:
             self.intake = IntakePreferences.model_validate(payload)
             validate_intake(self.intake)
@@ -172,6 +162,12 @@ AREAS = [
 
 
 class IntakeForm(forms.Form):
+    graduation_month = forms.IntegerField(
+        label="Graduation month", min_value=1, max_value=12, required=False
+    )
+    graduation_year = forms.IntegerField(
+        label="Graduation year", min_value=1950, max_value=2100, required=False
+    )
     full_name = forms.CharField(
         label="Full Name", max_length=150, widget=forms.TextInput(attrs={"autocomplete": "name"})
     )
@@ -249,7 +245,7 @@ class IntakeForm(forms.Form):
         help_text="Up to 8 interests, 1-3 words each. Separate them with commas.",
     )
     locations = forms.CharField(
-        label="Preferred cities or regions",
+        label="Cities or regions for on-site / hybrid work",
         required=False,
         max_length=500,
         widget=forms.TextInput(
@@ -263,7 +259,7 @@ class IntakeForm(forms.Form):
                 "aria-describedby": "id_locations_helptext",
             }
         ),
-        help_text="Leave blank to keep locations open.",
+        help_text="Selected areas limit on-site and hybrid work. Remote jobs elsewhere must let you stay here. Leave blank to keep locations open.",
     )
     work_arrangements = forms.MultipleChoiceField(
         label="Work arrangement",
@@ -374,11 +370,9 @@ class IntakeForm(forms.Form):
             )
         )
         self.intake = IntakePreferences(
-            authorization_country="",
-            authorized_to_work="unknown",
-            sponsorship_now="unknown",
-            sponsorship_future="unknown",
             graduation_status=cleaned["graduation_status"],
+            graduation_month=cleaned["graduation_month"],
+            graduation_year=cleaned["graduation_year"],
             locations=self.selected_areas,
             work_arrangements=cleaned["work_arrangements"],
             start_mode=cleaned["start_mode"],
@@ -389,6 +383,32 @@ class IntakeForm(forms.Form):
         except ValueError as exc:
             raise forms.ValidationError(str(exc)) from exc
         return cleaned
+
+    def create_session(self):
+        """Initialize saved onboarding from the validated website submission."""
+        if not self.is_valid():
+            raise ValueError("Validate the intake form before creating a session.")
+        return OnboardingSession(
+            id=uuid.uuid4().hex,
+            documents=self.documents,
+            role_hint="",
+            interest_hint=self.cleaned_data["interests"],
+            professional_years=self.cleaned_data["professional_years"],
+            history=[],
+            stage="intake",
+            intake=self.intake,
+            general_information=self.general_information,
+            analysis=OnboardingAnalysis(
+                summary="Your background is saved. Let's get to know you.",
+                evidence=[],
+                conflicts=[],
+                missing_information=[],
+                suggested_roles=[],
+                suggested_interests="",
+                preference_suggestions=[],
+                next_question=None,
+            ),
+        )
 
 
 class RevisionForm(forms.Form):

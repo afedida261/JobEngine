@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 import httpx
 from bs4 import BeautifulSoup
 
+from jobengine.infrastructure.diagnostics import emit
 from jobengine.infrastructure.storage import Store
 from jobengine.models import JobPage, utc_now
 
@@ -107,6 +108,7 @@ def fetch_page(url: str, store: Store | None = None, force: bool = False) -> Job
     if store and not force:
         cached = store.cached(key, 6 * 3600)
         if cached:
+            emit("http", "cache_hit", url=url)
             return JobPage.model_validate(cached)
     try:
         current = validate_public_url(url)
@@ -128,6 +130,13 @@ def fetch_page(url: str, store: Store | None = None, force: bool = False) -> Job
                         )
                         continue
                     response.raise_for_status()
+                    emit(
+                        "http",
+                        "retrieved",
+                        url=str(response.url),
+                        http_status=response.status_code,
+                        redirects=_,
+                    )
                     content_type = response.headers.get("content-type", "").lower()
                     if not any(
                         t in content_type
@@ -171,6 +180,15 @@ def fetch_page(url: str, store: Store | None = None, force: bool = False) -> Job
                     return page
             raise ValueError("Too many source redirects.")
     except (httpx.HTTPError, ValueError, OSError) as exc:
+        emit(
+            "http",
+            "failed",
+            url=original,
+            error_type=type(exc).__name__,
+            reason=str(exc),
+            http_status=getattr(getattr(exc, "response", None), "status_code", None),
+            retried=False,
+        )
         return JobPage(
             requested_url=original,
             url=original,

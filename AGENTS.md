@@ -33,7 +33,7 @@ intake, a short interview, profile review, search-plan approval, discovery, asse
   migration regression checks; its Streamlit entry point is `ui/legacy_app.py`.
 - Put model instructions in [jobengine/prompts.py](jobengine/prompts.py), with request/reasoning/cache
   configuration in [llm.py](jobengine/infrastructure/llm.py). Preserve Terra with low interview
-  reasoning and Sol with high search reasoning during unrelated work. Templates must support
+  reasoning and Sol with low search reasoning during unrelated work. Templates must support
   general applicants.
 - Preserve saved JSON compatibility and profile/brief approval fingerprints when changing schemas
   or workflow state. Profile or brief edits require renewed approval before discovery.

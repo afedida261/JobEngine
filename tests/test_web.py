@@ -116,15 +116,9 @@ def intake_data(case):
     return {
         "full_name": "Alex Example",
         "background": case[0].documents[0].text,
-        "authorization_country": "United States",
-        "authorized_to_work": "yes",
-        "sponsorship_now": "no",
-        "sponsorship_future": "no",
         "graduation_status": "not_applicable",
         "start_mode": "any",
-        "relocation": "any",
-        "compensation_basis": "base",
-        "currency": "USD",
+        "relocation": "no",
         "consent": "on",
     }
 
@@ -465,10 +459,7 @@ def test_preferences_invalidate_profile_brief_and_visible_current_results(web, c
     workspace, run = complete_search(client, case)
     record = workspace.current()
     values = PreferencesForm.initial_for(record.session.intake)
-    values["authorization_country"] = "United States"
-    values.update(
-        {"revision": record.revision, "locations": "Chicago", "minimum_compensation": "70000"}
-    )
+    values.update({"revision": record.revision, "locations": "Chicago"})
     values = {key: value for key, value in values.items() if value is not None}
     response = client.post("/preferences/", values)
     assert response.status_code == 302
@@ -743,7 +734,6 @@ def test_setup_saves_picker_values_and_decimal_experience_without_removed_fields
     assert len(record.session.intake.locations) == 5
     assert record.session.intake.work_arrangements == ["remote", "hybrid"]
     assert record.session.intake.start_mode == "asap"
-    assert record.session.intake.authorization_country == ""
     assert all(constraint.id != "C2" for constraint in intake_constraints(record.session.intake))
     assert fake.calls == ["onboarding_interview"]
 
@@ -787,8 +777,6 @@ def test_general_information_survives_interview_and_backup(web, case):
 @pytest.mark.parametrize(
     "changes",
     [
-        {"authorization_country": ""},
-        {"minimum_compensation": "nan"},
         {"graduation_status": "graduated"},
         {"start_mode": "date"},
     ],
@@ -1051,3 +1039,200 @@ def test_agent_status_uses_actual_callbacks_as_readable_sentences(web, case):
     )
     assert response["events"][-2]["message"] == "I'm looking for open roles at Example Org."
     assert len(response["events"]) == 4
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        {
+            "school": "Westhaven College",
+            "degree": "undergraduate",
+            "program": "Design",
+            "graduation_status": "graduated",
+            "graduation_month": "5",
+            "graduation_year": "2025",
+            "professional_years": "0.75",
+            "interests": "Design, design, Community outreach",
+            "locations": "boston, NYC",
+            "work_arrangements": ["remote", "hybrid"],
+            "start_mode": "date",
+            "start_date": "2027-01-02",
+        },
+        {
+            "school": "",
+            "degree": "",
+            "program": "",
+            "professional_years": "",
+            "graduation_month": "",
+            "graduation_year": "",
+            "interests": "",
+            "locations": "",
+            "work_arrangements": [],
+            "start_date": "",
+        },
+        {},
+    ],
+)
+@pytest.mark.parametrize("guided", [False, True])
+def test_terminal_form_registration_matches_django_terra_state(
+    web, case, tmp_path, monkeypatch, details, guided
+):
+    from copy import deepcopy
+
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    from jobengine.terminal.artifacts import read_json, write_json
+    from jobengine.terminal.cli import main
+
+    client, fake = web
+    received = []
+    structured = fake.structured
+
+    def capture(operation, instructions, data, schema):
+        received.append((operation, instructions, deepcopy(data), schema))
+        if guided and operation == "onboarding_interview":
+            raise OSError("Synthetic provider failure")
+        return structured(operation, instructions, data, schema)
+
+    monkeypatch.setattr(fake, "structured", capture)
+    values = {
+        "full_name": "Alex Example",
+        "graduation_status": "not_applicable",
+        "start_mode": "any",
+    } | details
+    resume = tmp_path / "resume.txt"
+    resume.write_text(case[0].documents[0].text, encoding="utf-8")
+    client.get("/")
+    response = client.post(
+        "/start/", values | {"resume": SimpleUploadedFile(resume.name, resume.read_bytes())}
+    )
+    assert response.status_code == 302
+    website = workspace_for(client).current().session
+    website_request = received.pop()
+    root = tmp_path / "terminal"
+    intake_path = tmp_path / "intake.json"
+    write_json(intake_path, values)
+    output = []
+
+    def invoke(*args, answers=()):
+        replies = iter(answers)
+        return main(
+            ["--root", str(root), *map(str, args)],
+            client_factory=lambda store: fake,
+            input_fn=lambda prompt: next(replies),
+            output=output.append,
+        )
+
+    assert invoke("candidate", "parity", "--resume", resume, "--intake", intake_path) == 0
+    assert received == []  # Registration retains the staged workflow: no model call.
+    assert invoke("interview", "parity", "--non-interactive") == 0
+    assert received.pop() == website_request
+    saved = read_json(root / "candidates/parity/session.json")
+    assert {k: v for k, v in saved.items() if k != "id"} == website.model_dump(
+        mode="json", exclude={"id"}
+    )
+    assert invoke("interview", "parity", "--restart", "--non-interactive") == 0
+    assert received.pop() == website_request
+    assert read_json(root / "candidates/parity/session.json") == saved
+    assert invoke("interview", "parity", answers=["/finish"]) == 0
+    profile = read_json(root / "candidates/parity/profile.json")
+    assert profile["intake"] == saved["intake"]
+    assert profile["documents"] == saved["documents"]
+    assert profile["professional_years"] == saved["professional_years"]
+    assert list(root.glob("runs/parity/*/interview/session.json"))
+    if guided:
+        return
+    # The real planning path receives these same preserved profile fields.
+    assert invoke("plan", "parity", "--non-interactive", "--confirm-profile") == 0
+    plan_input = next(
+        data for operation, _, data, _ in received if operation == "onboarding_search_brief"
+    )
+    assert plan_input["confirmed_intake"] == saved["intake"]
+
+
+@pytest.mark.parametrize(
+    "changes, field",
+    [
+        ({"full_name": ""}, "full_name"),
+        ({"full_name": None}, "full_name"),
+        ({"degree": "invalid"}, "degree"),
+        ({"school": "invalid"}, "school"),
+        ({"graduation_status": "invalid"}, "graduation_status"),
+        ({"work_arrangements": ["invalid"]}, "work_arrangements"),
+        ({"work_arrangements": "remote"}, "work_arrangements"),
+        ({"professional_years": -1}, "professional_years"),
+        ({"professional_years": "invalid"}, "professional_years"),
+        ({"graduation_month": 13}, "graduation_month"),
+        ({"graduation_year": 1800}, "graduation_year"),
+        ({"graduation_status": "studying", "graduation_month": 5}, "__all__"),
+        (
+            {"graduation_status": "graduated", "graduation_month": 5, "graduation_year": 2100},
+            "__all__",
+        ),
+        ({"start_mode": "date", "start_date": ""}, "__all__"),
+        ({"start_date": "bad-date"}, "start_date"),
+        ({"locations": "invalid"}, "locations"),
+        ({"interests": "one two three four"}, "interests"),
+    ],
+)
+def test_terminal_form_rejects_same_invalid_inputs_without_candidate_state(
+    web, case, tmp_path, changes, field
+):
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    from jobengine.terminal.artifacts import write_json
+    from jobengine.terminal.cli import main
+    from jobengine.web.forms import IntakeForm
+
+    _, fake = web
+    values = {
+        "full_name": "Alex Example",
+        "graduation_status": "not_applicable",
+        "start_mode": "any",
+    } | changes
+    resume = tmp_path / "resume.txt"
+    resume.write_text(case[0].documents[0].text, encoding="utf-8")
+    form = IntakeForm(values, {"resume": SimpleUploadedFile(resume.name, resume.read_bytes())})
+    assert not form.is_valid()
+    assert field in form.errors
+    intake_path = tmp_path / "intake.json"
+    write_json(intake_path, values)
+    root = tmp_path / "terminal"
+    output = []
+    assert (
+        main(
+            [
+                "--root",
+                str(root),
+                "candidate",
+                "invalid",
+                "--resume",
+                str(resume),
+                "--intake",
+                str(intake_path),
+            ],
+            output=output.append,
+        )
+        == 1
+    )
+    assert not (root / "candidates/invalid").exists()
+    error = "\n".join(output)
+    assert field + "=" in error
+    assert str(form.errors[field][0]) in error
+    assert fake.calls == []
+
+
+def test_retired_preferences_are_not_exposed_by_either_web_form(web, case):
+    from jobengine.models import RETIRED_INTAKE_FIELDS
+    from jobengine.web.forms import IntakeForm, PreferencesForm
+
+    for form in (IntakeForm(), PreferencesForm()):
+        assert not RETIRED_INTAKE_FIELDS.intersection(form.fields)
+    client, _ = web
+    start_profile(client, case)
+    response = client.get("/preferences/")
+    assert response.status_code == 200
+    for name in RETIRED_INTAKE_FIELDS:
+        assert f'name="{name}"'.encode() not in response.content
+    assert b'name="locations"' in response.content
+    assert b'name="graduation_status"' in response.content

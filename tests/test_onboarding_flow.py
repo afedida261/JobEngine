@@ -55,21 +55,19 @@ class PolicyClient:
         )
 
 
-def test_optional_blanks_do_not_create_location_or_pay_restrictions(intake):
+def test_optional_blanks_do_not_create_location_restrictions(intake):
     constraints = intake_constraints(intake)
-    assert {c.id for c in constraints} == {"C2", "C3"}
+    assert {c.id for c in constraints} == {"C3"}
     assert "2026-09" in constraints[-1].value
     assert "immediately" in constraints[-1].value
-    assert "does not require employer sponsorship" in constraints[0].value
 
 
 def test_structured_preferences_keep_explicit_restrictions(intake):
     intake.locations = ["New York City", "Long Island"]
     intake.relocation = "no"
-    intake.minimum_compensation = 80000
     values = {c.id: c.value for c in intake_constraints(intake)}
     assert "Willing to relocate: no" in values["C1"]
-    assert "annual base compensation: USD 80,000" in values["C4"]
+    assert set(values) == {"C1", "C3"}
 
 
 def test_graduation_status_requires_a_date_only_when_applicable(intake):
@@ -214,11 +212,6 @@ def test_confirmed_intake_does_not_return_as_unanswered_applicant_questions(
                     ),
                     BriefUncertainty(
                         subject="applicant",
-                        field="sponsorship",
-                        question="Does the employer need to offer sponsorship?",
-                    ),
-                    BriefUncertainty(
-                        subject="applicant",
                         field="location",
                         question="Pick a location restriction",
                     ),
@@ -263,10 +256,6 @@ def test_snapshot_restores_after_restart_and_rejects_stale_duplicates(case, inta
 
 
 def fill_required_intake(app, prefix="intake_"):
-    app.selectbox(key=prefix + "country").set_value("United States")
-    app.selectbox(key=prefix + "authorized").set_value("Yes")
-    app.selectbox(key=prefix + "sponsorship_now").set_value("No")
-    app.selectbox(key=prefix + "sponsorship_future").set_value("No")
     app.selectbox(key=prefix + "graduation_status").set_value("Graduated")
     app.selectbox(key=prefix + "graduation_month").set_value(9)
     app.number_input(key=prefix + "graduation_year").set_value(2026)
@@ -360,7 +349,7 @@ def test_intake_validation_blocks_model_and_saves_sources_if_provider_fails(case
     app.text_area(key="onboarding_background").set_value(case[0].documents[0].text)
     next(b for b in app.button if b.label == "Start my onboarding").click().run()
     assert not calls
-    assert any("authorization and graduation" in e.value for e in app.error)
+    assert any("graduation" in e.value for e in app.error)
     fill_required_intake(app)
     next(b for b in app.button if b.label == "Start my onboarding").click().run()
     assert len(calls) == 1
@@ -406,3 +395,166 @@ def test_submitted_answer_survives_provider_failure_and_refresh(case, monkeypatc
     assert (
         Store(os.environ["JOBENGINE_DATA_DIR"]).load_onboarding().session.pending_answer == answer
     )
+
+
+def test_retired_intake_is_readable_but_absent_from_current_exports(intake):
+    from jobengine.models import RETIRED_INTAKE_FIELDS, IntakePreferences, current_constraints
+
+    legacy = intake.model_dump(mode="json") | {
+        "authorization_country": "Canada",
+        "authorized_to_work": "no",
+        "sponsorship_now": "yes",
+        "sponsorship_future": "unknown",
+        "remote_countries": ["Canada"],
+        "minimum_compensation": 999999,
+        "currency": "CAD",
+        "compensation_basis": "total",
+    }
+    restored = IntakePreferences.model_validate(legacy)
+    assert restored == intake
+    assert not RETIRED_INTAKE_FIELDS.intersection(restored.model_dump())
+    assert not RETIRED_INTAKE_FIELDS.intersection(
+        IntakePreferences.model_json_schema()["properties"]
+    )
+    assert current_constraints(
+        [
+            {
+                "id": "C1",
+                "field": "Location / remote / relocation",
+                "value": "Acceptable locations: Boston; Remote work countries: Canada; Willing to relocate: no",
+                "hard": True,
+            }
+        ]
+    ) == [
+        {
+            "id": "C1",
+            "field": "Location / remote / relocation",
+            "value": "Acceptable locations: Boston; Willing to relocate: no",
+            "hard": True,
+        }
+    ]
+
+
+def test_fixed_us_scope_is_in_every_model_stage(case, search_brief):
+    from jobengine.onboarding.brief import confirm_search_brief
+    from jobengine.prompts import APPLICANT_SCOPE, PROMPTS
+    from jobengine.search.discovery import public_brief
+
+    profile = case[0]
+    profile.search_brief = confirm_search_brief(profile, search_brief)
+    assert public_brief(profile)["work_country"] == "United States"
+    assert all(APPLICANT_SCOPE in instructions for instructions in PROMPTS.values())
+    assert "never needs employer sponsorship" in APPLICANT_SCOPE
+    assert "must not affect discovery, fit, ranking, or exclusions" in APPLICANT_SCOPE
+
+
+def test_saved_approved_profile_with_retired_preferences_returns_to_review(
+    case, intake, search_brief
+):
+    from jobengine.models import SavedOnboarding
+    from jobengine.onboarding.brief import confirm_search_brief
+
+    profile = case[0]
+    profile.intake = intake
+    profile.search_brief = confirm_search_brief(profile, search_brief)
+    session = start_onboarding(PolicyClient(case), profile.documents, intake=intake)
+    session.stage = "ready"
+    original = SavedOnboarding(
+        session=session, profile=profile, brief_draft=search_brief, last_run_id="historical"
+    ).model_dump(mode="json")
+    original["profile"]["intake"]["minimum_compensation"] = 999999
+    restored = SavedOnboarding.model_validate(original)
+    assert restored.session.stage == "profile"
+    assert not restored.profile.confirmed and restored.profile.search_brief is None
+    assert restored.brief_draft is None and restored.last_run_id is None
+    assert restored.session.documents == session.documents
+
+
+def test_selected_locations_never_default_to_unrestricted_relocation(case, search_brief):
+    from jobengine.models import IntakePreferences, Profile
+    from jobengine.onboarding.brief import confirm_search_brief
+    from jobengine.search.discovery import public_brief
+
+    intake = IntakePreferences(
+        graduation_status="not_applicable",
+        locations=["NYC"],
+        work_arrangements=["on_site", "hybrid", "remote"],
+    )
+    assert intake.relocation == "no"
+    location = next(c for c in intake_constraints(intake) if c.id == "C1")
+    assert location.hard
+    assert "On-site and hybrid work must be in: NYC" in location.value
+    assert "without relocating" in location.value
+    profile = Profile.model_validate(
+        case[0].model_dump()
+        | {
+            "intake": intake,
+            "constraints": intake_constraints(intake),
+        }
+    )
+    profile.search_brief = confirm_search_brief(profile, search_brief)
+    handoff = public_brief(profile)
+    assert handoff["location_preferences"] == [location.value]
+
+
+@pytest.mark.parametrize("relocation", [None, "any", "no", "yes"])
+def test_saved_location_constraints_are_rebuilt_and_old_plan_requires_review(
+    case, search_brief, relocation
+):
+    from jobengine.models import IntakePreferences, Profile
+    from jobengine.onboarding.brief import confirm_search_brief, require_confirmed_search_brief
+
+    profile = case[0]
+    profile.search_brief = confirm_search_brief(profile, search_brief)
+    saved = profile.model_dump(mode="json")
+    saved["intake"] = {
+        "graduation_status": "not_applicable",
+        "locations": ["NYC"],
+        "work_arrangements": ["remote", "hybrid"],
+    }
+    if relocation is not None:
+        saved["intake"]["relocation"] = relocation
+    saved["constraints"] = [
+        {
+            "id": "C1",
+            "field": "Location / remote / relocation",
+            "value": "Acceptable locations: NYC; Work arrangements: remote, hybrid",
+            "hard": True,
+        }
+    ]
+    restored = Profile.model_validate(saved)
+    assert restored.intake.relocation == ("yes" if relocation == "yes" else "no")
+    assert "On-site and hybrid work must be in: NYC" in restored.constraints[0].value
+    assert "without relocating" in restored.constraints[0].value
+    assert not restored.confirmed and restored.search_brief is None
+    with pytest.raises(ValueError, match="confirm"):
+        require_confirmed_search_brief(restored)
+    assert Profile.model_validate(restored.model_dump()) == restored
+    assert IntakePreferences(graduation_status="unknown").location_constraint() is None
+
+
+def test_sol_planning_receives_nyc_limits_and_remote_exception(case, search_brief):
+    from jobengine.models import BriefProposal, IntakePreferences, Profile
+    from jobengine.onboarding.brief import propose_search_brief
+
+    intake = IntakePreferences(
+        graduation_status="not_applicable",
+        locations=["NYC"],
+        work_arrangements=["on_site", "hybrid", "remote"],
+    )
+    profile = Profile.model_validate(
+        case[0].model_dump() | {"intake": intake, "constraints": intake_constraints(intake)}
+    )
+
+    class Client:
+        def structured(self, operation, instructions, data, schema):
+            assert operation == "onboarding_search_brief"
+            assert data["confirmed_intake"]["relocation"] == "no"
+            location = next(c for c in data["constraints"] if c["id"] == "C1")
+            assert location["hard"]
+            assert "On-site and hybrid work must be in: NYC" in location["value"]
+            assert "without relocating" in location["value"]
+            assert "Never infer nationwide relocation" in instructions
+            return BriefProposal(plan=search_brief, uncertainties=[])
+
+    assert propose_search_brief(Client(), profile).target_roles == profile.target_roles

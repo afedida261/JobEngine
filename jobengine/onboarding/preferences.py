@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from datetime import date
 
 from jobengine.models import Constraint, IntakePreferences
@@ -14,11 +13,6 @@ def is_hard_constraint(constraint: Constraint) -> bool:
 
 
 def validate_intake(intake: IntakePreferences) -> None:
-    if not intake.authorization_country.strip() and any(
-        value != "unknown"
-        for value in (intake.authorized_to_work, intake.sponsorship_now, intake.sponsorship_future)
-    ):
-        raise ValueError("Choose the country for your work authorization.")
     if intake.graduation_status in {"graduated", "studying"} and (
         intake.graduation_month is not None or intake.graduation_year is not None
     ):
@@ -38,45 +32,15 @@ def validate_intake(intake: IntakePreferences) -> None:
             )
     if intake.start_mode == "date" and intake.start_date is None:
         raise ValueError("Choose your earliest start date.")
-    if intake.minimum_compensation is not None and (
-        not math.isfinite(intake.minimum_compensation) or intake.minimum_compensation <= 0
-    ):
-        raise ValueError("Enter a positive compensation floor or leave it unrestricted.")
 
 
 def intake_constraints(intake: IntakePreferences) -> list[Constraint]:
     """No extra LLM parsing; blank optional preferences generate no restriction."""
     validate_intake(intake)
     constraints = []
-    location_parts = []
-    if intake.locations:
-        location_parts.append("Acceptable locations: " + ", ".join(intake.locations))
-    if intake.work_arrangements:
-        location_parts.append(
-            "Work arrangements: " + ", ".join(x.replace("_", " ") for x in intake.work_arrangements)
-        )
-    if intake.remote_countries:
-        location_parts.append("Remote work countries: " + ", ".join(intake.remote_countries))
-    if intake.relocation != "any":
-        location_parts.append("Willing to relocate: " + intake.relocation)
-    if location_parts:
-        constraints.append(
-            Constraint(
-                id="C1",
-                field="Location / remote / relocation",
-                value="; ".join(location_parts),
-                hard=True,
-            )
-        )
-    authorization = f"Country: {intake.authorization_country}; authorized to work: {intake.authorized_to_work}; sponsorship needed now: {intake.sponsorship_now}; sponsorship needed in future: {intake.sponsorship_future}."
-    if intake.sponsorship_now == "no" and intake.sponsorship_future == "no":
-        authorization += " Applicant does not require employer sponsorship; whether an employer offers sponsorship is not an applicant requirement."
-    if intake.authorization_country.strip():
-        constraints.append(
-            Constraint(
-                id="C2", field="Work authorization / sponsorship", value=authorization, hard=True
-            )
-        )
+    location = intake.location_constraint()
+    if location:
+        constraints.append(location)
     graduation = {
         "graduated": "Graduated",
         "studying": "Expected graduation",
@@ -98,15 +62,6 @@ def intake_constraints(intake: IntakePreferences) -> list[Constraint]:
             hard=False,
         )
     )
-    if intake.minimum_compensation is not None:
-        constraints.append(
-            Constraint(
-                id="C4",
-                field="Compensation",
-                value=f"Minimum annual {intake.compensation_basis} compensation: {intake.currency} {intake.minimum_compensation:,.0f}",
-                hard=True,
-            )
-        )
     if intake.other_exclusions.strip():
         constraints.append(
             Constraint(
@@ -118,11 +73,7 @@ def intake_constraints(intake: IntakePreferences) -> list[Constraint]:
 
 def resolved_intake_fields(intake: IntakePreferences) -> set[str]:
     # Optional blanks are an explicit lack of restriction, not unanswered facts.
-    resolved = {"availability", "location", "compensation"}
+    resolved = {"availability", "location"}
     if intake.graduation_status != "unknown":
         resolved.add("graduation")
-    if intake.authorized_to_work != "unknown":
-        resolved.add("authorization")
-    if intake.sponsorship_now != "unknown" and intake.sponsorship_future != "unknown":
-        resolved.add("sponsorship")
     return resolved

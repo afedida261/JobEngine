@@ -95,7 +95,7 @@ def main():
             else models.index(DEFAULT_SEARCH_MODEL),
             key="model",
         )
-        st.caption("Interview: low reasoning · Search and job assessment: high reasoning")
+        st.caption("Interview: low reasoning · Search and job assessment: low reasoning")
         st.text_input(
             "API key (optional session override)",
             type="password",

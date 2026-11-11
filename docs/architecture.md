@@ -14,12 +14,99 @@ the existing backend interfaces. `ui/` retains the old Streamlit implementation 
 3. `onboarding/brief.py`: proposes and validates a search plan, then fingerprints the reviewed profile
    and approved brief. `require_confirmed_search_brief` enforces approval in the backend as well as UI.
 4. `search/pipeline.py`: `run_search` orchestrates sector, company, and posting research; `evaluate`
-   extracts and validates employer facts, assesses fit, and calls deterministic ranking.
+   extracts and validates employer facts, assesses fit, and calls deterministic ranking. Optional
+   `max_minutes` provides a monotonic time budget checked before discovery/evaluation steps. An
+   in-flight step finishes; completed results are saved with `time_limit` as the stop reason.
+   The terminal `search --max-minutes` option reports that run as partial. Omission changes no limits.
+   Optional `greenhouse_boards={token: employer}` selects board discovery instead of the web path.
+   Alternatively `discover_greenhouse=True` discovers boards from the same approved profile/brief,
+   with `board_search_requests` and `max_boards` overrides (defaults 4 and 12). The two modes are
+   mutually exclusive. Dynamic verification responses pass through an invocation-local postings
+   cache to the existing collector; no duplicate discovery or board retrieval is performed.
+   After the same approval/evidence guards, a small branch collects/deduplicates via `discover_boards`,
+   ranks the complete pool with `prioritize_semantically(..., hybrid=True)`, and backfills existing
+   `evaluate(..., page=page)` until `limit` strong/weaker recommendations or a budget is reached.
+   `max_assessments` defaults to `MAX_INSPECTIONS` (20), accepts 1–20 and counts failed attempts too.
+   Stop reasons distinguish target, assessment cap, pool exhaustion, time, cost and source failures.
+   No job-page refetch occurs. Its embedding wrapper shares the ModelClient SDK and Store ledger
+   without owning the SDK. Greenhouse `Run.jobs` contains confirmed recommendations only; other
+   outcomes stay in inspected jobs/diagnostics with dispositions and reasons.
+   Board/embedding failures retain partial results with explicit stop reasons/warnings. Existing
+   web discovery, Sol assessment and result ranking remain unchanged.
+   `search/employer_identity.py` supplies the shared API/web employer identity gate. Exact names
+   agree directly; legal-name variants and organizational components require independent posting
+   evidence and employer provenance. Explicit subsidiary, division, department, alias and owned-brand
+   relationships can reconcile different names. Greenhouse board/post IDs must agree with provenance;
+   caller-provided employer headers are excluded as evidence. No corporate-name allowlist or fuzzy
+   substring matching is used. Accepted/rejected `employer_identity` diagnostics retain the reason,
+   names and supporting evidence; unsupported relationships remain unverified before assessment.
 5. `search/discovery.py` discovers source-backed employers and posting URLs. `retrieval.py` fetches
    public pages, extracts text, and caches provenance. `ranking.py` applies the current category/score
    rules. Requirement assessments retain the model's contextual interpretation, including experience
    alternatives, subject to evidence validation; ranking does not override them by comparing numeric
    years. Model-identified required gaps still exclude. Known weaknesses are in TODO.
+   `search/greenhouse.py` is a standalone, read-only Greenhouse Job Board API connector.
+   `fetch_board_jobs(board_token)` returns typed `GreenhouseJob` records, preserving post/internal IDs,
+   board token, title, location, original URL, and raw description. Empty boards return `[]`;
+   HTTP/transport/JSON/schema failures raise `GreenhouseError`. It reuses HTTPX and existing URL-shape
+   validation; the connector itself makes no model calls, retries or candidate-state writes.
+   `search/greenhouse_adapter.py` exposes `adapt_posting(posting, employer=...)`, returning existing
+   `DiscoveryItem`/`JobPage` inputs without I/O. Employer display names are supplied explicitly;
+   location is retained in page text because `DiscoveryItem` has no location field. The board API
+   URL is the company source, and extraction metadata retains board/post/internal IDs. The adapter
+   decodes escaped HTML, reuses `extract_html`, and retains description sections outside main/article.
+   Pages use UTC timestamps and SHA-256 text hashes. Missing/short or oversized descriptions become
+   explicit failed pages using the existing 250-character / 90,000-character retrieval conventions.
+   No shared schemas or evaluation/discovery behavior change.
+   `search/greenhouse_batch.py` exposes `discover_boards({token: employer})`, returning unique
+   existing item/page pairs and per-board summary dictionaries. It reuses `pipeline.job_identity`,
+   keeps first occurrences, and retains every occurrence's provenance in summary posting records.
+   Board failures are isolated; failed pages remain candidates. Unknown counts on board failures
+   stay `None`. The collector performs no qualification filtering or model calls; the opt-in search
+   branch supplies its output to semantic screening and existing evaluation.
+   `search/greenhouse_discovery.py` provides `discover_greenhouse_boards(client, profile)`.
+   It enforces existing profile/brief fingerprints and searches the complete public brief, with
+   rotating query/sector angles and previously seen boards, rather than selecting a few employers
+   per sector. Tokens come only from supported Greenhouse URLs in web-search provenance. Each unique
+   board is checked once through `fetch_board_jobs`; failures count against the board limit. Separate
+   structured employer labeling requires exact source-title evidence. API availability and observed
+   employer labels remain distinct; missing labels exclude a board from the returned mapping.
+   `BoardDiscoveryResult.boards` is directly compatible with `discover_boards`, while candidates,
+   source URLs/labels, searches, failures, deferred boards, limits and counters retain diagnostics.
+   Defaults cap search requests at four (one web tool call each), label calls at four, and board
+   inspections at twelve; hard maxima are eight and forty. Both new model operations use the existing
+   search model/reasoning/cache/ledger configuration. The pipeline calls it only for explicit dynamic
+   opt-in. Optional `postings_cache` captures successful API responses; the batch collector accepts
+   these via `prefetched_postings`, including empty lists, without refetching. The pipeline supplies
+   a deadline callback and stops before new work on time/cost exhaustion. Discovery empty/error/
+   unidentified stops are distinct from empty verified boards and exhausted assessed candidate pools.
+   `search/prescreen.py` exposes `prioritize_postings(pairs, approved_profile, top_n=10)` for a
+   standalone deterministic evaluation queue. It uses normalized token/inflection overlap,
+   description corpus frequencies, existing evidence keyword scoring, and conservative location
+   signals. It returns selected original pairs plus the entire scored/explained pool. Non-selected
+   rows are deferred for this batch, never rejected. Existing profile/plan approval guards apply;
+   it makes no HTTP/model calls or qualification decisions and does not modify production ranking.
+   `search/semantic.py` is an independent embedding-only alternative. It constructs a bounded query
+   from roles, interests, approved work themes and selected evidence summaries, then ranks existing
+   item/page pairs by cosine similarity. Job text orders responsibility sections before requirements
+   and fallback prose; recognized generic company/benefit sections are omitted. Full pages remain
+   intact. Embedding-only remains the default. Optional `hybrid=True` applies
+   `search/semantic_priorities.py` to existing similarities without further provider calls. It uses
+   source-grounded existing `JobFacts` when supplied, or narrowly explicit requirements/source labels.
+   Bounded adjustments cover explicit tenure, location/relocation/arrangement restrictions, declared
+   employment preferences and clear non-job/duty-denial evidence. Original similarities, source
+   quotes, uncertainty flags, final scores and deferral reasons are retained. Missing or unsupported
+   structure is neutral; there is no automatic rejection. The optional Greenhouse branch uses hybrid
+   screening for evaluation priority; default web search does not use semantic screening.
+   Qualification-context parsing recognizes minimum ranges, N+ years and separate maximum bounds;
+   preference/alternative/unrelated wording stays neutral. `search/geography.py` holds offline
+   US state/region data and same-city aliases, with no geocoder, commute or metro expansion. Explicit
+   role residency statements can supply source-backed soft conflicts; unknown areas stay unverified.
+   `infrastructure/embeddings.py` batches `text-embedding-3-small` requests with 1,536 dimensions,
+   disables automatic retries, validates response indices/vectors, and uses existing `Store` cache
+   and cost reservations/settlements. Cache keys include model, local representation epoch, source
+   hash and embedded-text hash; job keys contain no applicant identity. Unknown/broken embeddings
+   remain unscored/deferred in the complete pool. No vector database or additional agent is used.
 6. `web/views.py` composes applicant pages and enforces HTTP methods, revision checks, ownership,
    and approval. `web/forms.py` validates uploads, preferences, editable profiles, plans, and backups.
    Django templates and static assets provide the interface without a frontend framework or build.
@@ -45,9 +132,21 @@ answers and reviewed profiles are saved before model work so failures retain the
 Backend approval fingerprints are checked before search, including after edits and on retries.
 
 Landing-page details are retained in the optional `OnboardingSession.general_information` field and
-as a labeled source document. Intake can retain education status without a graduation date and leave
-authorization undeclared; blank authorization creates no restriction. Existing snapshots remain
-loadable, and profile/brief fingerprints retain their existing structure.
+as a labeled source document. Intake can retain education status without a graduation date.
+The prototype assumes a US citizen seeking US jobs who never needs sponsorship. Intake and matching
+omit authorization, sponsorship, remote-work countries, and compensation preferences. Discovery uses
+United States as its work country; every model stage receives the same product scope instructions.
+Current intake schemas and exports omit retired keys. Compatibility validators discard those keys,
+retired constraints/suggestions/terms, and remote-country clauses from older JSON. Affected profiles
+lose their approvals, and saved web workspaces return to profile review with stale plan drafts cleared.
+Other profile/brief fingerprints retain their existing structure. Terminal commands normalize
+resumable working files on load; immutable historical artifacts remain intact.
+Selected locations are hard limits for on-site/hybrid work. Permitted remote roles elsewhere must
+allow work from those selected areas without moving. `IntakePreferences.location_constraint()` owns
+this shared wording for forms, profiles, planning, discovery, and assessment. Relocation defaults to
+`no`; legacy `any` values load as `no`. Even explicit relocation consent does not expand the selected
+areas. Older location constraints are rebuilt on profile load, clearing affected profile/plan
+approvals so an outdated nationwide plan cannot authorize discovery.
 
 The optional `OnboardingSession.interview_mode` defaults to `adaptive` for existing JSON. A failed
 interview model call or invalid extraction switches the session to `guided`, saving only supported
@@ -76,11 +175,32 @@ retrieval limits, and the cost ledger retain their existing behavior.
 - `infrastructure/llm.py` owns request construction, reasoning settings, cache keys, usage estimates,
   and model-provider interaction. Interview calls default to GPT-6.1 Terra with low reasoning;
   search planning, discovery, extraction, assessment, and their repairs default to GPT-6.1 Sol with
-  high reasoning. Each stage has its own model setting (see README). The selected model determines
+  low reasoning. Each stage has its own model setting (see README). The selected model determines
   cache identity, cost rates, and ledger entries; `ModelClient.model` identifies the search model
   recorded on exported runs. It reserves costs before requests and disables automatic retries.
 - `infrastructure/storage.py` owns SQLite caching, the cost ledger, atomic onboarding snapshots,
   revision checks, active-candidate selection, and JSON run/review files.
+- `terminal/cli.py` exposes candidate registration, interview, plan review/approval, search, and
+  saved-page evaluation through `python -m jobengine`. It calls the same backend functions and
+  approval guards, with candidate working state separate from the web/legacy active record and a
+  shared cost ledger. Resume-plus-form-JSON registration calls Django `IntakeForm` and its shared
+  `create_session` initializer; backend onboarding remains independent of Django. Optional graduation
+  month/year use the existing intake date validator. `terminal/artifacts.py` writes run snapshots,
+  stage events and per-job traces.
+  Repeatable `search --greenhouse TOKEN=EMPLOYER` selects only the supplied boards.
+  `search --discover-greenhouse` selects dynamic discovery instead, with `--board-search-requests`
+  and `--max-boards` limits. Existing profile/brief approvals are reused. Dynamic details and discovery
+  ledger costs are saved to `search/greenhouse-discovery.json`; failures remain visible even when
+  successful boards later satisfy the target. No usable boards means no screening/assessment.
+  Diagnostic observations save `search/greenhouse-boards.json`, `greenhouse-pool.json` and `embedding-usage.json`,
+  including deferred original pages, similarity/adjustment evidence, evaluation outcomes and ledger
+  receipts. Shared saved-data schemas and approval fingerprints are unchanged.
+- `infrastructure/diagnostics.py` provides opt-in context-local observations, inert outside a
+  diagnostic run. Model calls expose requests, pre-parse HTTP responses, validated results and
+  failures; discovery/retrieval/evaluation expose rejected candidates and stage outcomes. `evaluate`
+  optionally accepts a saved `JobPage` for replay; its default still retrieves normally. No prompt,
+  schema, validation, matching, or search-strategy changes are involved. Artifact formats and
+  Windows commands are documented in [terminal-debugging.md](terminal-debugging.md).
 
 Discovery caches last one hour, source text six hours, and other model responses one day. Cache keys
 include the prompt, schema, model, and reasoning effort. Source validation failures and provider
@@ -105,6 +225,9 @@ Tests are organized by behavior rather than historical implementation runs:
   task failures/restarts, bookmarks, exports, backups, legacy import, CSRF, and browser isolation.
 - `test_web_browser.py`: runs the shipped interview event handlers with Node when available,
   including answer/skip submission with named form controls and keyboard submission.
+- `test_terminal.py`: named candidates, interactive and non-interactive orchestration, approval
+  gates/fingerprints, independent search and saved-page replay, partial failures, raw invalid model
+  output, redaction and state isolation, using fake providers and isolated storage.
 
 Tests do not depend on the fictional resumes under `.scratch/` or on saved real applicant
 data. Keep local experiments and live-validation artifacts in `.scratch/`, not under `tests/`.

@@ -410,3 +410,45 @@ def test_unsupported_homepage_can_use_an_actual_sourced_company_subpage(case, se
 
     result = discover_companies(Client(), case[0], search_brief.sectors[0])
     assert result.companies[0].official_url == "https://real.example/about"
+
+
+@pytest.mark.parametrize("stop_after", ["companies", "jobs", "evaluate"])
+def test_time_budget_stops_new_work_and_retains_completed_results(
+    case, search_brief, tmp_path, monkeypatch, stop_after
+):
+    from types import SimpleNamespace
+
+    client, profile, calls = setup_search(
+        case,
+        search_brief,
+        tmp_path,
+        monkeypatch,
+        {"Robotics": "weaker", "Industrial software": "strong"},
+    )
+    clock = [100.0]
+    monkeypatch.setattr(pipeline, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    method = {"companies": "discover_companies", "jobs": "discover", "evaluate": "evaluate"}[
+        stop_after
+    ]
+    original = getattr(pipeline, method)
+
+    def expire(*args, **kwargs):
+        result = original(*args, **kwargs)
+        clock[0] += 30
+        return result
+
+    monkeypatch.setattr(pipeline, method, expire)
+    run = pipeline.run_search(client, profile, limit=2, max_minutes=0.5)
+    assert run.search.stop_reason == "time_limit"
+    assert all("Industrial" not in detail for _, detail in calls)
+    expected = {"companies": 1, "jobs": 2, "evaluate": 3}[stop_after]
+    assert len(calls) == expected
+    assert len(run.inspected_jobs) == (1 if stop_after == "evaluate" else 0)
+    assert client.store.load_run(run.id)["search"]["stop_reason"] == "time_limit"
+    assert any("completed results are retained" in warning for warning in run.search.warnings)
+
+
+@pytest.mark.parametrize("minutes", [0, -1, float("inf"), float("nan")])
+def test_invalid_search_time_budget_rejected_before_research(case, minutes):
+    with pytest.raises(ValueError, match="positive, finite"):
+        pipeline.run_search(None, case[0], max_minutes=minutes)

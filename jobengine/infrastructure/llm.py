@@ -1,15 +1,29 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import TypeVar
 
-from openai import OpenAI
+from openai import DefaultHttpxClient, OpenAI
 from pydantic import BaseModel
 
+from jobengine.infrastructure.diagnostics import emit, observing
 from jobengine.infrastructure.storage import Store
 from jobengine.prompts import BASE_INSTRUCTIONS
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _observe_response(response):
+    """Capture the response before SDK schema parsing, including invalid JSON outputs."""
+    if observing():
+        response.read()
+        try:
+            body = response.json()
+        except ValueError:
+            body = response.text
+        emit("model", "wire_response", http_status=response.status_code, response=body)
+
 
 # Standard short-context USD per million tokens, verified 2026-11-09.
 # https://developers.openai.com/api/docs/pricing
@@ -23,6 +37,7 @@ PRICES = {
 }
 DEFAULT_INTERVIEW_MODEL = "gpt-6.1-terra"
 DEFAULT_SEARCH_MODEL = "gpt-6.1-sol"
+SEARCH_REASONING_EFFORT = "low"
 
 SEARCH_OPERATIONS = frozenset(
     {
@@ -33,6 +48,8 @@ SEARCH_OPERATIONS = frozenset(
         "web_discovery",
         "normalize_companies",
         "normalize_discovery",
+        "greenhouse_board_discovery",
+        "normalize_greenhouse_employers",
         "extract_job",
         "repair_job_facts",
         "evaluate_fit",
@@ -56,9 +73,47 @@ class ModelClient:
             raise ValueError("This model has no configured cost rates. Choose a supported model.")
         self.store, self.model = store, model
         self.interview_model = interview_model
-        self.client = OpenAI(api_key=api_key, timeout=120, max_retries=0)
+        options = {}
+        if observing():
+            options["http_client"] = DefaultHttpxClient(
+                event_hooks={"response": [_observe_response]}
+            )
+        self.client = OpenAI(api_key=api_key, timeout=120, max_retries=0, **options)
 
-    def _request(
+    def _request(self, operation, prompt, schema=None, search=False, max_tool_calls=3):
+        started = time.monotonic()
+        emit(
+            "model",
+            "started",
+            operation=operation,
+            prompt=prompt,
+            schema=schema.model_json_schema() if schema else None,
+        )
+        try:
+            result = self._request_impl(operation, prompt, schema, search, max_tool_calls)
+            emit(
+                "model",
+                "validated",
+                operation=operation,
+                result=result,
+                duration_seconds=time.monotonic() - started,
+            )
+            return result
+        except Exception as exc:
+            emit(
+                "model",
+                "failed",
+                operation=operation,
+                error_type=type(exc).__name__,
+                reason=str(exc),
+                duration_seconds=time.monotonic() - started,
+                retried=False,
+                http_status=getattr(getattr(exc, "response", None), "status_code", None),
+                response_body=getattr(exc, "body", None),
+            )
+            raise
+
+    def _request_impl(
         self,
         operation: str,
         prompt: str,
@@ -70,7 +125,7 @@ class ModelClient:
         max_tools = max(1, min(max_tool_calls, 5)) if search else 0
         is_search = search or operation in SEARCH_OPERATIONS
         model = self.model if is_search else self.interview_model
-        effort = "high" if is_search else "low"
+        effort = SEARCH_REASONING_EFFORT if is_search else "low"
         signature = {
             "version": 3,
             "operation": operation,
@@ -83,9 +138,11 @@ class ModelClient:
             "max_output": max_output,
             "max_tools": max_tools,
         }
+        emit("model", "configured", operation=operation, configuration=signature)
         key = self.store.key(signature)
         cached = self.store.cached(key, 3600 if search else 86400)
         if cached is not None:
+            emit("model", "cache_hit", operation=operation, configuration=signature)
             return cached
         input_rate, output_rate = PRICES[model]
         # UTF-8 bytes conservatively bound tokens for supplied text. Search has
@@ -116,10 +173,26 @@ class ModelClient:
                 include=["web_search_call.action.sources"],
             )
         # If a call fails or its billing is ambiguous the reservation remains.
+        emit(
+            "model",
+            "request",
+            operation=operation,
+            payload=kwargs,
+            response_schema=schema.model_json_schema() if schema else None,
+            reserved_usd=reserve,
+            ledger_receipt=receipt,
+        )
         if schema:
             response = self.client.responses.parse(**kwargs, text_format=schema)
         else:
             response = self.client.responses.create(**kwargs)
+        if observing():
+            emit(
+                "model",
+                "raw_response",
+                operation=operation,
+                response=response.model_dump(mode="json", warnings=False),
+            )
         # ParsedResponse's generic nested serializer can log entire candidate
         # objects as Pydantic warnings. Only serialize the metadata we need.
         raw = (

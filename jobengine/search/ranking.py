@@ -19,47 +19,6 @@ from jobengine.onboarding.preferences import is_hard_constraint
 CATEGORY_ORDER = {"strong": 0, "weaker": 1, "needs_review": 2, "excluded": 3, "unverified": 4}
 
 
-def _country(value):
-    value = re.sub(r"[^a-z]", "", value.casefold())
-    return {
-        "us": "unitedstates",
-        "usa": "unitedstates",
-        "unitedstatesofamerica": "unitedstates",
-        "uk": "unitedkingdom",
-        "gb": "unitedkingdom",
-    }.get(value, value)
-
-
-def _authorization_without_sponsorship(profile, facts, page):
-    intake = profile.intake
-    if (
-        not intake
-        or intake.authorized_to_work != "yes"
-        or intake.sponsorship_now != "no"
-        or intake.sponsorship_future != "no"
-    ):
-        return None
-    restrictions = (
-        " ".join(r.quote for r in facts.requirements if r.importance == "required")
-        + " "
-        + " ".join(t.value for t in facts.terms if t.field == "authorization")
-    )
-    if re.search(
-        r"citizen|citizenship|clearance|permanent resident|ITAR|export control", restrictions, re.I
-    ):
-        return None  # Do not infer citizenship or clearance from work authorization.
-    countries = [
-        t
-        for t in facts.terms
-        if t.field == "work_country" and contains_field_quote(page.text, t.quote, 2)
-    ]
-    if countries and all(
-        _country(t.value) == _country(intake.authorization_country) for t in countries
-    ):
-        return countries[0]
-    return None
-
-
 def rank_job(
     profile: Profile, item: DiscoveryItem, page: JobPage, facts: JobFacts, judgment: FitJudgment
 ) -> RankedJob:
@@ -95,14 +54,12 @@ def rank_job(
     judgment.requirements = list(assessments.values())
 
     checks: dict[str, ConstraintAssessment] = {}
-    country_term = _authorization_without_sponsorship(profile, facts, page)
     for c in judgment.constraints:
+        if c.constraint_id in {"C2", "C4"} and c.constraint_id not in constraints:
+            continue  # Retired checks in saved assessments cannot affect current ranking.
         if c.constraint_id not in constraints or c.constraint_id in checks:
             issues.append("Unknown or duplicate constraint assessment discarded.")
             continue
-        if c.constraint_id == "C2" and c.status == "unknown" and country_term:
-            c.status, c.job_quote = "meets", country_term.quote
-            c.explanation = f"Applicant confirms authorization in {profile.intake.authorization_country} and does not need sponsorship now or in future. Employer sponsorship availability is not required."
         cited_term = any(
             t.quote == c.job_quote
             and contains_field_quote(page.text, t.quote, 2 if t.field == "work_country" else 3)

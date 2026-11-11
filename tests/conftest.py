@@ -30,10 +30,6 @@ def intake():
     from jobengine.models import IntakePreferences
 
     return IntakePreferences(
-        authorization_country="United States",
-        authorized_to_work="yes",
-        sponsorship_now="no",
-        sponsorship_future="no",
         graduation_status="graduated",
         graduation_month=9,
         graduation_year=2026,

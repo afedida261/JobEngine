@@ -14,8 +14,6 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 
 from jobengine.grounding import validate_evidence
 from jobengine.models import (
-    OnboardingAnalysis,
-    OnboardingSession,
     Profile,
     SavedOnboarding,
     SearchBriefDraft,
@@ -167,28 +165,7 @@ def start(request):
         None if demo_requested else request.FILES or None,
     )
     if request.method == "POST" and form.is_valid():
-        values = form.cleaned_data
-        session = OnboardingSession(
-            id=uuid.uuid4().hex,
-            documents=form.documents,
-            role_hint="",
-            interest_hint=values["interests"],
-            professional_years=values["professional_years"],
-            history=[],
-            stage="intake",
-            intake=form.intake,
-            general_information=form.general_information,
-            analysis=OnboardingAnalysis(
-                summary="Your background is saved. Let's get to know you.",
-                evidence=[],
-                conflicts=[],
-                missing_information=[],
-                suggested_roles=[],
-                suggested_interests="",
-                preference_suggestions=[],
-                next_question=None,
-            ),
-        )
+        session = form.create_session()
         try:
             record = workspace.save(SavedOnboarding(session=session))
             return launch(request, workspace, record, "intake", "interview")

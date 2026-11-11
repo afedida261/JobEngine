@@ -47,7 +47,7 @@ def recorded_client(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "operation,model,effort",
-    [(operation, "gpt-6.1-sol", "high") for operation in sorted(llm.SEARCH_OPERATIONS)]
+    [(operation, "gpt-6.1-sol", "low") for operation in sorted(llm.SEARCH_OPERATIONS)]
     + [
         (operation, "gpt-6.1-terra", "low")
         for operation in (
@@ -66,21 +66,21 @@ def test_request_model_and_reasoning_depend_on_workflow(recorded_client, operati
 
 def test_reasoning_change_cannot_reuse_a_cached_response(recorded_client, monkeypatch):
     client, calls = recorded_client
-    client.interview_model = client.model
+    monkeypatch.setattr(llm, "SEARCH_REASONING_EFFORT", "high")
     client.structured("evaluate_fit", "Synthetic task", {}, AnswerCheck)
     client.structured("evaluate_fit", "Synthetic task", {}, AnswerCheck)
     assert len(calls) == 1
-    monkeypatch.setattr(llm, "SEARCH_OPERATIONS", llm.SEARCH_OPERATIONS - {"evaluate_fit"})
+    monkeypatch.setattr(llm, "SEARCH_REASONING_EFFORT", "low")
     client.structured("evaluate_fit", "Synthetic task", {}, AnswerCheck)
     assert [c["reasoning"]["effort"] for c in calls] == ["high", "low"]
     assert calls[0]["model"] == calls[1]["model"]
 
 
-def test_hosted_search_uses_sol_high_even_for_a_new_operation(recorded_client):
+def test_hosted_search_uses_sol_low_even_for_a_new_operation(recorded_client):
     client, calls = recorded_client
     client.search("Synthetic search", operation="another_search")
     assert calls[0]["model"] == "gpt-6.1-sol"
-    assert calls[0]["reasoning"] == {"effort": "high"}
+    assert calls[0]["reasoning"] == {"effort": "low"}
     assert calls[0]["tools"][0]["type"] == "web_search"
 
 
