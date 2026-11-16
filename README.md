@@ -17,10 +17,29 @@ A typing screen displays “Personalizing Questions” and opens the first quest
 shows only the current question: **Continue** or **Ctrl+Enter** (**Cmd+Enter** on Mac) submits an
 answer. Accepted answers remain saved; reviewing or editing earlier answers is not exposed yet.
 Every page uses the same logo and size as the start page.
-In local development, **Try Jane Doe** beside **Development Page** fills the form with the fictional
-applicant from `.scratch/jane-doe/intake.json` and `resume.md`, then starts a fresh interview. Previous
-interview answers are never imported. The shortcut is hidden outside local development or when its
-fixture files are absent.
+After the interview finishes, the browser opens `/results/` directly. The old overview is no longer
+the post-interview destination. The page uses an owned saved run when available and otherwise shows
+the honest empty state. New paid searches still require profile and search-plan approval.
+
+In local development, **View saved demo** opens `/demo/`: the existing landing page filled with
+John Doe's saved information. **Start my interview** replays one actual saved Terra question and
+answer; **Continue** leads directly to the existing results dashboard. **View saved results** shows
+the original Audience Team Intern, Wirecutter recommendation
+from run `fae81e1c4fb7468ebb0556563ed8e0df`, with expandable assessment and original source link.
+The dashboard also includes the saved Reporting Fellow and Creative Development Intern, Wirecutter
+postings labeled **Needs review**, with their actual assessment gaps and uncertainties. These are
+review cases, not recommendations; normal dashboard eligibility is unchanged. The Audience Team
+Intern remains the saved weaker recommendation, with its original uncertainties; this replay does not
+verify whether the posting is still available or update its dates.
+
+Open `http://127.0.0.1:8000/demo/` after starting Django. Each step has a stable URL; refresh preserves
+the displayed step, and **Restart demo** (or the logo) returns to the prefilled landing page.
+All demo controls are read-only and stay on demo routes. No model/search tasks run, no applicant is
+imported, and the normal browser workspace and saved files remain untouched. The default snapshots
+are `.scratch/controlled-john-demo/onboarding-for-local-library.json` and the run JSON in `data/runs/`.
+`JOBENGINE_DEMO_INTERVIEW` and `JOBENGINE_DEMO_RUN` may select a matching approved onboarding/run pair.
+Replay is loopback-only in local development and unavailable if either recording is missing, invalid,
+or belongs to a different profile. No replacement content is invented.
 
 Search quality and latency remain unresolved. Current priorities and concrete failures are recorded
 in [TODO.md](TODO.md); the latest live validation is
@@ -54,7 +73,7 @@ files can keep that old entry; the stage-specific defaults apply without editing
 | `manage.py` | Django development and management entry point |
 | `jobengine/web/` | Django settings, routes, forms, workspace access, and background tasks |
 | `jobengine/web/templates/`, `static/` | Applicant screens, responsive styles, and browser interactions |
-| `jobengine/ui/` | Retained Streamlit implementation for migration regression checks |
+| `jobengine/ui/` | Retained Streamlit implementation for manual legacy use |
 | `jobengine/onboarding/` | Interview, topic policy, preferences, and search-plan approval |
 | `jobengine/search/` | Discovery, retrieval, assessment, and ranking |
 | `jobengine/infrastructure/` | Model requests, SQLite/file storage, and resume reading |
@@ -82,8 +101,8 @@ John Doe's resume is at `.scratch/john-doe/John_Doe_Resume.docx`.
 Tests do not make paid model requests or change the real candidate data. Pytest collects only `tests/`;
 Ruff excludes `.scratch/`. To format an edit, run `python -m ruff format` on the changed files.
 `python manage.py check` validates Django configuration; `node --check jobengine/web/static/jobengine/app.js`
-checks JavaScript syntax when Node is installed. Legacy Streamlit tests use
-`jobengine/ui/legacy_app.py`; Streamlit is now a development dependency.
+checks JavaScript syntax when Node is installed. Legacy Streamlit UI tests are retired; the
+Streamlit development dependency supports manual use of `jobengine/ui/legacy_app.py`.
 When Node is available, pytest also runs offline checks of interview submission and navigation.
 
 ## Diagnostic commands
@@ -187,7 +206,10 @@ incomplete, and titles lacking employer names can leave valid boards unidentifie
 
 Backend callers use `run_search(..., discover_greenhouse=True, board_search_requests=4, max_boards=12)`
 for the integrated path. Discovery respects the existing shared cost budget and optional search time
-budget; in-flight requests finish before stopping. No automatic retry or fallback is added.
+budget; in-flight requests finish before stopping. Each coverage query uses a short approved role;
+when it returns no usable sources, a separate request may try a shorter form within the same budget.
+No equivalent planned query is repeated. Debug runs distinguish planned queries, completed searches,
+ignored tool attempts, absent raw URL entries, extraction failures, and recovery outcomes.
 Debug runs save `search/greenhouse-discovery.json` with queries, source URLs, observed labels, verified,
 failed and deferred boards, limits, stop reason and discovery ledger usage/costs. The existing
 `greenhouse-boards.json`, `greenhouse-pool.json`, `embedding-usage.json` and whole-run `usage.json`

@@ -207,7 +207,9 @@ class ModelClient:
         usage = raw.get("usage") or {}
         input_tokens, output_tokens = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
         searches = sum(
-            o.get("type") == "web_search_call" and o.get("action", {}).get("type") == "search"
+            o.get("type") == "web_search_call"
+            and o.get("status") == "completed"
+            and o.get("action", {}).get("type") == "search"
             for o in raw.get("output", [])
         )
         # Include the cache-write premium even if this call did not incur it.

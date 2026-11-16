@@ -71,3 +71,14 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 1_000_000
 DATA_UPLOAD_MAX_NUMBER_FILES = 4
 # The legacy library is only available on loopback in development.
 LOCAL_LIBRARY = DEBUG and os.getenv("JOBENGINE_LOCAL_LIBRARY", "1") == "1"
+# Recorded John Doe validation; replay never starts AI work or imports candidate state.
+_recorded_demo = BASE_DIR / ".scratch" / "controlled-john-demo"
+RECORDED_DEMO_INTERVIEW = Path(
+    os.getenv("JOBENGINE_DEMO_INTERVIEW", str(_recorded_demo / "onboarding-for-local-library.json"))
+)
+RECORDED_DEMO_RUN = Path(
+    os.getenv(
+        "JOBENGINE_DEMO_RUN",
+        str(BASE_DIR / "data" / "runs" / "fae81e1c4fb7468ebb0556563ed8e0df.json"),
+    )
+)

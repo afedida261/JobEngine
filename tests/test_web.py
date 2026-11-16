@@ -2,6 +2,7 @@
 
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -20,9 +21,12 @@ def web(monkeypatch, isolated_app_data, case, search_brief):
     from jobengine.models import (
         AnswerCheck,
         BriefProposal,
+        InterviewExchange,
         OnboardingAnalysis,
+        OnboardingSession,
         Question,
         Run,
+        SavedOnboarding,
         SearchRecord,
     )
     from jobengine.onboarding.brief import require_confirmed_search_brief
@@ -102,7 +106,70 @@ def web(monkeypatch, isolated_app_data, case, search_brief):
     monkeypatch.setattr(
         tasks.POOL, "submit", lambda function, *args, **kwargs: function(*args, **kwargs)
     )
-    with override_settings(ALLOWED_HOSTS=["testserver", "localhost"], LOCAL_LIBRARY=True):
+    demo_root = Path(os.environ["JOBENGINE_DATA_DIR"]).parent / "recorded-demo"
+    demo_root.mkdir(parents=True)
+    demo_onboarding = SavedOnboarding(
+        session=OnboardingSession(
+            id="syntheticrecordedterra",
+            documents=case[0].documents,
+            role_hint="",
+            interest_hint="",
+            professional_years=0,
+            history=[
+                InterviewExchange(
+                    question="Which synthetic project would you like to discuss?",
+                    purpose="Saved synthetic Terra fixture",
+                    answer="A ranking project.",
+                    source_id="D1",
+                )
+            ],
+            analysis=OnboardingAnalysis(
+                summary="Synthetic recorded interview",
+                evidence=case[0].evidence,
+                conflicts=[],
+                missing_information=[],
+                suggested_roles=[],
+                suggested_interests="",
+                preference_suggestions=[],
+                next_question=None,
+            ),
+            interview_finished=True,
+            stage="profile",
+        ),
+    )
+    from jobengine.onboarding.brief import confirm_search_brief
+
+    demo_profile = case[0].model_copy(deep=True)
+    demo_profile.search_brief = confirm_search_brief(demo_profile, search_brief)
+    demo_onboarding.profile = demo_profile
+    demo_onboarding.session.stage = "ready"
+    demo_job = rank_job(*case)
+    demo_run = Run(
+        id="syntheticrecordedsol",
+        model="gpt-6.1-sol",
+        purpose="validation",
+        profile=demo_profile,
+        search=SearchRecord(
+            query="Synthetic saved search",
+            retrieved_at="2026-11-11",
+            summary="",
+            sources=[],
+            jobs=[case[1]],
+            warnings=[],
+        ),
+        jobs=[demo_job],
+        inspected_jobs=[demo_job],
+    )
+    demo_interview_path = demo_root / "onboarding.json"
+    demo_run_path = demo_root / "run.json"
+    demo_interview_path.write_text(demo_onboarding.model_dump_json(), encoding="utf-8")
+    demo_run_path.write_text(demo_run.model_dump_json(), encoding="utf-8")
+    with override_settings(
+        ALLOWED_HOSTS=["testserver", "localhost"],
+        LOCAL_LIBRARY=True,
+        RECORDED_DEMO_INTERVIEW=demo_interview_path,
+        RECORDED_DEMO_RUN=demo_run_path,
+    ):
         yield Client(), fake
 
 
@@ -174,8 +241,8 @@ def test_jane_demo_uses_real_intake_and_starts_with_unanswered_questions(
     (source / "resume.md").write_text(case[0].documents[0].text, encoding="utf-8")
     monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
     document = BeautifulSoup(client.get("/start/").content, "html.parser")
-    assert document.select_one(".setup-footer [data-jane-demo]")
-    assert json.loads(document.select_one("#jane-demo-data").string)["full_name"] == "Jane Doe"
+    assert document.select_one('.setup-heading a[href="/demo/"]')
+    assert not document.select_one(".setup-footer [data-jane-demo]")
     response = client.post("/start/", {"demo": "jane"})
     assert response.url.startswith("/activity/")
     session = workspace_for(client).current().session
@@ -195,10 +262,10 @@ def test_jane_demo_is_available_only_in_local_development(web):
     from django.test import override_settings
 
     client, fake = web
-    assert b"data-jane-demo" not in client.get("/start/", REMOTE_ADDR="203.0.113.1").content
+    assert b"View saved demo" not in client.get("/start/", REMOTE_ADDR="203.0.113.1").content
     assert client.post("/start/", {"demo": "jane"}, REMOTE_ADDR="203.0.113.1").status_code == 404
     with override_settings(LOCAL_LIBRARY=False):
-        assert b"data-jane-demo" not in client.get("/start/").content
+        assert b"View saved demo" not in client.get("/start/").content
         assert client.post("/start/", {"demo": "jane"}).status_code == 404
     assert fake.calls == []
 
@@ -354,6 +421,197 @@ def complete_search(client, case):
     return workspace, run
 
 
+@pytest.fixture
+def dashboard_results(web, case):
+    """Synthetic results owned by this test browser, never production candidate data."""
+    client, fake = web
+    workspace, run = complete_search(client, case)
+    run.profile = case[0].model_copy(deep=True)
+    workspace.store.save_run(run.id, run.model_dump(mode="json"))
+    return client, fake, workspace, run
+
+
+def dashboard_job(run, number):
+    job = run.jobs[0].model_copy(deep=True)
+    job.discovery.title = job.facts.title = f"Synthetic role {number}"
+    job.discovery.url = job.page.url = job.page.requested_url = (
+        f"https://example.com/synthetic-role-{number}"
+    )
+    return job
+
+
+@pytest.mark.parametrize("count", [0, 1, 4])
+def test_results_dashboard_uses_selected_cards_in_order(dashboard_results, count):
+    client, fake, workspace, run = dashboard_results
+    run.jobs = run.inspected_jobs = [dashboard_job(run, index) for index in range(count)]
+    workspace.store.save_run(run.id, run.model_dump(mode="json"))
+    calls = list(fake.calls)
+    content = client.get("/results/").content.decode()
+    assert "Your search is complete." in content
+    assert 'aria-label="Your search is complete."' in content
+    assert 'class="results-title-reserve" aria-hidden="true"' in content
+    assert 'data-typewriter data-type-speed="35" aria-hidden="true"' in content
+    assert content.count('<details class="result-card"') == count
+    assert "Not recommended" not in content
+    if count:
+        assert content.index("Synthetic role 0") < content.index("Requirements")
+        assert [content.index(f"Synthetic role {index}") for index in range(count)] == sorted(
+            content.index(f"Synthetic role {index}") for index in range(count)
+        )
+        assert 'target="_blank" rel="noopener noreferrer">View original posting ↗</a>' in content
+    else:
+        assert "No matching opportunities were found in this search." in content
+    main = content.split('<main id="main"')[1].split("</main>")[0]
+    for forbidden in (
+        "YOUR DASHBOARD",
+        "Real opportunities",
+        "<aside",
+        "<form",
+        "<button",
+        "<progress",
+    ):
+        assert forbidden not in main
+    assert fake.calls == calls
+
+
+def test_results_dashboard_renders_reviewed_stretch_without_reimplementing_selection(
+    dashboard_results, monkeypatch
+):
+    from jobengine.models import Requirement, RequirementAssessment
+    from jobengine.search.ranking import rank_job
+    from jobengine.web import views
+    from jobengine.web.presentation import StretchReview, select_dashboard_cards
+
+    client, _, workspace, run = dashboard_results
+    recommendation = dashboard_job(run, 1)
+    stretch = dashboard_job(run, 2)
+    stretch.facts.requirements.append(
+        Requirement(
+            id="R3",
+            text="Two years of professional experience",
+            quote="Two years of professional experience required",
+            importance="required",
+            minimum_professional_years=2,
+        )
+    )
+    stretch.judgment.requirements.append(
+        RequirementAssessment(
+            requirement_id="R3",
+            status="gap",
+            evidence_ids=[],
+            explanation="Synthetic candidate reports 1.5 years, a six-month gap.",
+        )
+    )
+    stretch.judgment.requirements[1].status = "unknown"
+    stretch.judgment.requirements[
+        1
+    ].explanation = "Ranking-system responsibilities are not established."
+    stretch.judgment.uncertainties = ["Confirm the scope of the ranking project."]
+    run.profile.professional_years = 1.5
+    stretch = rank_job(
+        run.profile, stretch.discovery, stretch.page, stretch.facts, stretch.judgment
+    )
+    run.jobs, run.inspected_jobs = [recommendation], [stretch, recommendation]
+    workspace.store.save_run(run.id, run.model_dump(mode="json"))
+    # Production supplies no implicit reviews. This explicit test review exercises the same helper.
+    review = StretchReview(
+        run.id, stretch.discovery.url, ("R3",), "Synthetic human review: modest gap."
+    )
+    calls = []
+
+    def reviewed_selection(saved_run):
+        calls.append(saved_run.id)
+        return select_dashboard_cards(saved_run, reviewed_stretches=[review])
+
+    monkeypatch.setattr(views, "select_dashboard_cards", reviewed_selection)
+    content = client.get("/results/").content.decode()
+    assert calls == [run.id]
+    assert content.count('<details class="result-card"') == 2
+    assert content.index("Synthetic role 1") < content.index("Synthetic role 2")
+    assert content.count(">Not recommended</span>") == 1
+    assert f'data-run-id="{run.id}" data-job-position="0"' in content
+    assert f'data-run-id="{run.id}" data-job-position="1"' in content
+    stretch_html = content.split("Synthetic role 2", 1)[1]
+    assert stretch_html.index("Requirements") < stretch_html.index("Your strengths")
+    assert stretch_html.index("Your strengths") < stretch_html.index("Your gaps")
+    assert stretch_html.index("Your gaps") < stretch_html.index("Original job posting")
+    assert "Two years of professional experience" in stretch_html
+    assert "Synthetic candidate reports 1.5 years, a six-month gap." in stretch_html
+    assert "<h3>Not established</h3>" in stretch_html
+    assert "Ranking-system responsibilities are not established." in stretch_html
+    assert "Confirm the scope of the ranking project." in stretch_html
+    assert run.profile.evidence[0].summary in content
+    assert 'href="https://example.com/synthetic-role-2"' in stretch_html
+    assert not content.split('<details class="result-card"')[1].split(">", 1)[0].endswith("open")
+
+
+def test_results_dashboard_escapes_content_and_handles_optional_location(dashboard_results):
+    client, _, workspace, run = dashboard_results
+    job = dashboard_job(run, 1)
+    job.facts.title = job.discovery.title = '<img src=x onerror="alert(1)">'
+    job.facts.location = None
+    job.judgment.requirements[0].explanation = '<script>alert("assessment")</script>'
+    run.profile.evidence[0].summary = '<script>alert("evidence")</script>'
+    job.discovery.url = job.page.url = job.page.requested_url = "https://example.com/job?a=1&b=2"
+    run.jobs = run.inspected_jobs = [job]
+    workspace.store.save_run(run.id, run.model_dump(mode="json"))
+    content = client.get("/results/").content.decode()
+    assert "<img src=x" not in content
+    assert "<script>alert" not in content
+    assert "&lt;img src=x" in content
+    assert "&lt;script&gt;alert(&quot;assessment&quot;)&lt;/script&gt;" in content
+    assert "&lt;script&gt;alert(&quot;evidence&quot;)&lt;/script&gt;" in content
+    assert 'href="https://example.com/job?a=1&amp;b=2"' in content
+    assert '<span class="result-card-meta">Synthetic company</span>' in content
+    assert "No confirmed qualification gaps." in content
+    assert "Not established" not in content
+
+
+def test_results_dashboard_keeps_shared_logo_and_four_functional_navigation_links(
+    dashboard_results,
+):
+    client, _, _, _ = dashboard_results
+    for path in ("/results/", "/profile/", "/opportunities/", "/saved/", "/applied/"):
+        content = client.get(path).content.decode()
+        assert '<a class="landing-brand" href="/" aria-label="JobEngine home">' in content
+        assert 'brand-logo.svg" width="1658" height="348" alt="JobEngine"' in content
+        nav = content.split('<nav id="workspace-navigation"')[1].split("</nav>")[0]
+        assert nav.count("<a ") == 4
+        for route, label in (
+            ("/profile/", "Your profile"),
+            ("/results/", "Suggested roles"),
+            ("/saved/", "Saved roles"),
+            ("/applied/", "Applied roles"),
+        ):
+            assert f'href="{route}"' in nav
+            assert label in nav
+
+
+def test_november_11_run_renders_only_the_honest_empty_state(dashboard_results):
+    from pathlib import Path
+
+    from jobengine.models import Run
+
+    path = Path(__file__).resolve().parents[1] / "data/runs/25002a07cfed44c3bf06ba3885fcd23d.json"
+    if not path.exists():
+        pytest.skip("The optional local November 11 validation run is not installed.")
+    before = path.read_bytes()
+    saved_run = Run.model_validate_json(before)
+    client, _, workspace, _ = dashboard_results
+    # Register a copy only in isolated test storage, never in the original data directory.
+    workspace.store.save_run(saved_run.id, saved_run.model_dump(mode="json"))
+    workspace.add_run(saved_run, workspace.current().session.id)
+    record = workspace.current()
+    record.last_run_id = saved_run.id
+    workspace.save(record)
+    content = client.get("/results/").content.decode()
+    assert "Your search is complete." in content
+    assert "No matching opportunities were found in this search." in content
+    assert '<details class="result-card"' not in content
+    assert "Employer identity mismatch" not in content
+    assert path.read_bytes() == before
+
+
 def test_new_workspace_pages_are_honest_and_do_not_call_models(web):
     client, fake = web
     for path in ("/", "/start/", "/plan/", "/opportunities/", "/saved/", "/settings/", "/library/"):
@@ -411,8 +669,9 @@ def test_full_applicant_journey_and_result_evidence(web, case):
     assert "I enjoy building useful things" in workspace.current().session.history[-1].answer
     assert client.post("/new/").status_code == 302
     workspace, run = complete_search(client, case)
+    assert client.get("/").url == "/results/"
     for path in (
-        "/",
+        "/results/",
         "/profile/",
         "/profile/?edit=1",
         "/preferences/",
@@ -958,14 +1217,14 @@ def test_approved_plan_can_start_search_and_land_on_dashboard(web, case):
     response = client.post("/plan/", values)
     assert response.status_code == 302
     status = client.get(response.url + "?format=json").json()
-    assert status["destination"] == "/"
+    assert status["destination"] == "/results/"
     assert "search" in fake.calls
     assert workspace.current().last_run_id
-    dashboard = client.get("/")
+    dashboard = client.get("/results/")
     assert dashboard.status_code == 200
-    assert b"YOUR DASHBOARD" in dashboard.content
+    assert b"Your search is complete." in dashboard.content
     assert b"navigation-menu" in dashboard.content
-    for href in (b"/profile/", b"/saved/", b"/applied/", b"/opportunities/"):
+    for href in (b"/profile/", b"/saved/", b"/applied/", b"/results/"):
         assert href in dashboard.content
     assert b"sidebar" not in dashboard.content
 
@@ -980,16 +1239,202 @@ def test_dashboard_follows_interview_before_any_search(web, case):
     response = client.post(
         "/conversation/", {"revision": workspace.current().revision, "action": "finish"}
     )
-    assert response.url == "/"
-    dashboard = client.get("/")
+    assert response.url == "/results/"
+    assert client.get("/").url == "/results/"
+    dashboard = client.get("/results/")
     assert dashboard.status_code == 200
-    assert b"YOUR DASHBOARD" in dashboard.content
-    assert b"Review my profile" in dashboard.content
+    assert b"Your search is complete." in dashboard.content
+    assert b"YOUR DASHBOARD" not in dashboard.content
     assert b"navigation-menu" in dashboard.content
     assert b"No confirmed fits this time" not in dashboard.content
     for path in ("/profile/", "/saved/", "/applied/", "/opportunities/"):
         assert client.get(path).status_code == 200
     assert "search" not in fake.calls
+
+
+def test_finished_interview_goes_directly_to_results(web, case):
+    client, fake = web
+    workspace = start_profile(client, case)
+    response = client.post(
+        "/conversation/", {"revision": workspace.current().revision, "action": "finish"}
+    )
+    assert response.url == "/results/"
+    content = client.get(response.url).content.decode()
+    assert "Your search is complete." in content
+    assert "YOUR DASHBOARD" not in content
+    assert "search" not in fake.calls
+
+
+def test_landing_links_to_recorded_demo(web):
+    client, _ = web
+    content = client.get("/start/").content.decode()
+    assert 'href="/demo/"' in content
+    assert "View saved demo" in content
+
+
+def test_recorded_demo_replays_question_then_results_without_spending_or_state_changes(web, case):
+    from django.conf import settings
+
+    client, fake = web
+    workspace, _ = complete_search(client, case)
+    before = workspace.current().model_dump_json()
+    files = (settings.RECORDED_DEMO_INTERVIEW, settings.RECORDED_DEMO_RUN)
+    saved = [path.read_bytes() for path in files]
+    calls = list(fake.calls)
+    assert 'href="/demo/"' in client.get("/start/").content.decode()
+    question = client.get("/demo/interview/").content.decode()
+    assert "Which synthetic project would you like to discuss?" in question
+    assert 'href="/demo/results/"' in question
+    assert "A ranking project." in question
+    assert "Continue" in question
+    assert "data-answer-form" not in question
+    content = client.get("/demo/results/").content.decode()
+    assert "Your search is complete." in content
+    assert "Synthetic engineer" in content
+    assert '<details class="result-card"' in content
+    assert fake.calls == calls
+    assert workspace.current().model_dump_json() == before
+    assert [path.read_bytes() for path in files] == saved
+
+
+def test_recorded_demo_shows_only_first_of_multiple_saved_exchanges(web):
+    from django.conf import settings
+
+    from jobengine.models import SavedOnboarding
+    from jobengine.web.demo import load_recorded_demo
+
+    client, fake = web
+    path = settings.RECORDED_DEMO_INTERVIEW
+    saved = SavedOnboarding.model_validate_json(path.read_text(encoding="utf-8"))
+    first = saved.session.history[0]
+    for index in range(2, 6):
+        saved.session.history.append(
+            first.model_copy(update={"question": f"Later saved question {index}"})
+        )
+    path.write_text(saved.model_dump_json(), encoding="utf-8")
+    before = path.read_bytes()
+    demo = load_recorded_demo()
+    assert len(demo.exchanges) == 1
+    assert demo.exchanges[0] == first
+    assert len(demo.onboarding.session.history) == 5
+    response = client.get("/demo/interview/")
+    content = response.content.decode()
+    assert first.question in content
+    assert first.answer in content
+    assert "Saved answer · 1 of 1" in content
+    assert 'href="/demo/results/"' in content
+    assert "Later saved question" not in content
+    assert client.get("/demo/interview/?question=2").status_code == 404
+    assert path.read_bytes() == before
+    assert fake.calls == []
+
+
+def test_recorded_demo_includes_saved_review_cases_without_changing_dashboard_selection(web):
+    from bs4 import BeautifulSoup
+    from django.conf import settings
+
+    from jobengine.models import Run
+    from jobengine.web.demo import select_demo_cards
+    from jobengine.web.presentation import select_dashboard_cards
+
+    client, fake = web
+    path = settings.RECORDED_DEMO_RUN
+    run = Run.model_validate_json(path.read_text(encoding="utf-8"))
+    original = run.inspected_jobs[0]
+    for index in range(2):
+        review = original.model_copy(deep=True)
+        review.category = "needs_review"
+        review.discovery.url = f"https://example.com/review-{index}"
+        review.facts.title = f"Synthetic review case {index}"
+        review.judgment.requirements[0].status = "gap" if index == 0 else "unknown"
+        review.judgment.requirements[0].explanation = f"Saved assessment caveat {index}"
+        review.judgment.uncertainties = [f"Saved uncertainty {index}"]
+        run.inspected_jobs.append(review)
+    excluded = original.model_copy(deep=True)
+    excluded.category = "excluded"
+    excluded.discovery.url = "https://example.com/excluded"
+    run.inspected_jobs.append(excluded)
+    path.write_text(run.model_dump_json(), encoding="utf-8")
+    before = path.read_bytes()
+    normal_before = select_dashboard_cards(run)
+    cards = select_demo_cards(run)
+    assert len(normal_before) == 1
+    assert len(cards) == 3
+    assert [card.position for card in cards] == [0, 1, 2]
+    assert all(card.run_id == run.id for card in cards)
+    assert cards[0].recommendation_status == "recommended"
+    assert all(card.recommendation_status == "not_recommended" for card in cards[1:])
+    assert cards[1].qualification_gaps[0].explanation == "Saved assessment caveat 0"
+    assert cards[2].unresolved_qualifications[0].explanation == "Saved assessment caveat 1"
+    assert cards[1].ranked_job == run.inspected_jobs[1]
+    assert cards[2].ranked_job == run.inspected_jobs[2]
+    content = client.get("/demo/results/").content.decode()
+    doc = BeautifulSoup(content, "html.parser")
+    rendered = doc.select("details.result-card")
+    assert len(rendered) == 3
+    assert not rendered[0].select(".result-card-status")
+    for index, card in enumerate(rendered[1:]):
+        assert card.select_one(".result-card-status").get_text() == "Needs review"
+        assert f"Saved assessment caveat {index}" in card.get_text()
+        assert f"Saved uncertainty {index}" in card.get_text()
+        assert (
+            card.select_one(".result-card-source")["href"] == f"https://example.com/review-{index}"
+        )
+    assert "Not recommended" not in content
+    assert select_dashboard_cards(run) == normal_before
+    assert path.read_bytes() == before
+    assert fake.calls == []
+
+
+def test_recorded_demo_is_local_read_only_and_missing_artifacts_are_not_fabricated(web):
+    from django.conf import settings
+    from django.test import override_settings
+
+    client, fake = web
+    for url in ("/demo/", "/demo/interview/", "/demo/profile/", "/demo/plan/", "/demo/results/"):
+        assert client.post(url).status_code == 405
+        assert client.get(url, REMOTE_ADDR="203.0.113.1").status_code == 404
+        with override_settings(LOCAL_LIBRARY=False):
+            assert client.get(url).status_code == 404
+    with override_settings(RECORDED_DEMO_RUN=settings.RECORDED_DEMO_RUN.with_name("missing.json")):
+        assert b"View saved demo" not in client.get("/start/").content
+        assert client.get("/demo/results/").status_code == 404
+    assert fake.calls == []
+
+
+def test_completed_interview_task_targets_results(web, case, monkeypatch):
+    from jobengine.onboarding.interview import finish_interview
+    from jobengine.web import tasks
+
+    client, _ = web
+    workspace = start_profile(client, case)
+    monkeypatch.setattr(
+        tasks,
+        "prepare_interview",
+        lambda workspace, identifier, session, operation: finish_interview(session),
+    )
+    response = client.post(
+        "/conversation/",
+        {
+            "revision": workspace.current().revision,
+            "answer": "My final synthetic interview answer.",
+        },
+        HTTP_ACCEPT="application/json",
+    )
+    status = client.get(response.json()["task_url"]).json()
+    assert status["status"] == "complete"
+    assert status["destination"] == "/results/"
+    assert client.get("/conversation/").url == "/results/"
+
+
+def test_results_route_rejects_another_workspaces_run(dashboard_results):
+    from django.test import Client
+
+    client, _, _, run = dashboard_results
+    assert client.get(f"/results/?run={run.id}").status_code == 200
+    other = Client()
+    other.get("/start/")
+    assert other.get(f"/results/?run={run.id}").status_code == 302
 
 
 def test_applied_roles_are_explicit_idempotent_private_and_persistent(web, case):
@@ -1236,3 +1681,65 @@ def test_retired_preferences_are_not_exposed_by_either_web_form(web, case):
         assert f'name="{name}"'.encode() not in response.content
     assert b'name="locations"' in response.content
     assert b'name="graduation_status"' in response.content
+
+
+def test_recorded_demo_complete_flow_is_isolated_and_has_no_live_actions(web, monkeypatch):
+    from bs4 import BeautifulSoup
+    from django.conf import settings
+
+    from jobengine.web import tasks, views
+
+    client, fake = web
+    client.get("/start/")
+    workspace = workspace_for(client)
+    assert workspace.current() is None
+    before = [
+        path.read_bytes() for path in (settings.RECORDED_DEMO_INTERVIEW, settings.RECORDED_DEMO_RUN)
+    ]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Recorded demo reached live workspace or model work")
+
+    monkeypatch.setattr(tasks, "launch", forbidden)
+    monkeypatch.setattr(tasks, "get_client", forbidden)
+    monkeypatch.setattr(tasks, "run_search", forbidden)
+    monkeypatch.setattr(views, "workspace_for", forbidden)
+    routes = ["/demo/", "/demo/interview/", "/demo/profile/", "/demo/plan/", "/demo/results/"]
+    for route in routes:
+        response = client.get(route)
+        assert response.status_code == 200
+        assert client.get(route).content == response.content
+        doc = BeautifulSoup(response.content, "html.parser")
+        for form in doc.select("form"):
+            assert form.get("method", "get").lower() == "get"
+            assert form.get("action", route).startswith("/demo/")
+        for link in doc.select("a[href]"):
+            href = link["href"]
+            assert href.startswith(("/demo/", "#", "https://", "http://"))
+        assert not doc.select("[data-answer-form]")
+    assert client.get("/demo/interview/?question=0").status_code == 404
+    assert client.get("/demo/interview/?question=2").status_code == 404
+    assert client.get("/demo/interview/?question=oops").status_code == 404
+    assert fake.calls == []
+    assert workspace.current() is None
+    assert workspace.runs() == []
+    assert before == [
+        path.read_bytes() for path in (settings.RECORDED_DEMO_INTERVIEW, settings.RECORDED_DEMO_RUN)
+    ]
+
+
+def test_recorded_demo_rejects_mismatched_profile_and_empty_answers(web):
+    import json
+
+    from django.conf import settings
+
+    client, _ = web
+    path = settings.RECORDED_DEMO_INTERVIEW
+    original = json.loads(path.read_text(encoding="utf-8"))
+    changed = json.loads(json.dumps(original))
+    changed["profile"]["professional_years"] = 42
+    path.write_text(json.dumps(changed), encoding="utf-8")
+    assert client.get("/demo/").status_code == 404
+    original["session"]["history"][0]["answer"] = None
+    path.write_text(json.dumps(original), encoding="utf-8")
+    assert client.get("/demo/").status_code == 404

@@ -2,7 +2,7 @@
 
 The application separates Django presentation from the backend workflows. No backend module imports
 Django, Streamlit, `jobengine.web`, or `jobengine.ui`. Applicant-facing changes live in `web/` and call
-the existing backend interfaces. `ui/` retains the old Streamlit implementation for regression checks.
+the existing backend interfaces. `ui/` retains the old Streamlit implementation for manual legacy use.
 
 ## Workflow and interfaces
 
@@ -110,6 +110,32 @@ the existing backend interfaces. `ui/` retains the old Streamlit implementation 
 6. `web/views.py` composes applicant pages and enforces HTTP methods, revision checks, ownership,
    and approval. `web/forms.py` validates uploads, preferences, editable profiles, plans, and backups.
    Django templates and static assets provide the interface without a frontend framework or build.
+   `web/presentation.py` supplies pure result-card data. `project_job(job, profile)`
+   joins requirements, assessments, differentiators, evidence and declarations against the saved run
+   profile. It preserves all qualifications and the original `RankedJob` alongside a five-requirement
+   preview; gaps and unknowns remain separate. `select_dashboard_cards(run)` preserves saved order and
+   original run/position references, selecting up to ten grounded `strong`/`weaker` recommendations.
+   It supplements to five only with explicit `StretchReview` records bound to the run, discovery URL
+   and every gap ID. Reviewers establish modestness/plausibility; no score threshold does so. Reviews
+   cannot override hard conflicts/unknowns, incomplete or ungrounded assessments, employer identity
+   failures, validation issues, required unknowns, or closed/expired postings. Unknown availability
+   retains its saved caveats. These helpers perform no I/O. Interview completion targets `/results/`;
+   `overview()` redirects there after interview setup, and `results()` renders `results_dashboard.html`
+   with `select_dashboard_cards(run)` for owned saved runs, or an empty list when none exists.
+   Native details/summary cards
+   expose requirements, supported strengths, gaps, unresolved qualifications and the original link.
+   No stretch reviews are supplied implicitly. `web/demo.py` loads a fixed, matching approved onboarding/run pair for the local-only
+   `/demo/` → `/demo/interview/` → `/demo/results/`
+   replay linked from `/start/`. It reuses existing templates, displays actual saved questions and
+   answers, and renders the original saved assessment through the same presentation helper.
+   The replay uses John's first answered exchange and saved Wirecutter weaker recommendation.
+   A demo-only selector also projects the two saved `needs_review` cases as **Needs review**,
+   retaining original run positions, gaps and uncertainties without changing normal eligibility.
+   His completed profile and approved plan remain available through the demo navigation.
+   Dedicated GET-only views bypass workspace/task helpers; navigation, logo and restart links stay
+   inside the replay. No mutable demo progress is stored: the URL identifies the current step.
+   Missing/invalid/mismatched recordings are unavailable and never replaced with invented content.
+
 7. `web/workspace.py` scopes compatible onboarding snapshots and runs to browser workspaces, persists
    bookmarks, and locks edits while a task is running. `web/tasks.py` runs existing workflows in a
    bounded local thread pool; SQLite records progress, completion, failure, and restart recovery.
@@ -180,6 +206,8 @@ retrieval limits, and the cost ledger retain their existing behavior.
   recorded on exported runs. It reserves costs before requests and disables automatic retries.
 - `infrastructure/storage.py` owns SQLite caching, the cost ledger, atomic onboarding snapshots,
   revision checks, active-candidate selection, and JSON run/review files.
+  Run JSON exports use `infrastructure/persistence.py`: unique temporary files, atomic replacement,
+  and six bounded attempts for permission/sharing errors. Essential export errors remain explicit.
 - `terminal/cli.py` exposes candidate registration, interview, plan review/approval, search, and
   saved-page evaluation through `python -m jobengine`. It calls the same backend functions and
   approval guards, with candidate working state separate from the web/legacy active record and a
@@ -201,6 +229,9 @@ retrieval limits, and the cost ledger retain their existing behavior.
   optionally accepts a saved `JobPage` for replay; its default still retrieves normally. No prompt,
   schema, validation, matching, or search-strategy changes are involved. Artifact formats and
   Windows commands are documented in [terminal-debugging.md](terminal-debugging.md).
+  Terminal observations retain events in memory when optional diagnostic files cannot be saved;
+  these failures are recorded as persistence failures and mark the artifact manifest partial.
+  Required result exports still raise `PersistenceError`; diagnostic I/O does not change search outcomes.
 
 Discovery caches last one hour, source text six hours, and other model responses one day. Cache keys
 include the prompt, schema, model, and reasoning effort. Source validation failures and provider
@@ -209,18 +240,18 @@ failures do not fabricate replacement results.
 ## Verification and developer tools
 
 `requirements.txt` contains application dependencies. `requirements-dev.txt` adds pytest, Ruff, and
-Streamlit for retained regression tests;
+Streamlit for manual legacy use; legacy Streamlit UI tests are retired;
 their configuration is in `pyproject.toml`. Use absolute `jobengine.*` imports and explicit imports
 from the owning module; package initializers do not re-export a second compatibility interface.
 
 Tests are organized by behavior rather than historical implementation runs:
 
 - `test_onboarding.py` and `test_onboarding_flow.py`: interview behavior, approval, saving, recovery,
-  and actual form flows with fake model clients.
+  with fake model clients.
 - `test_sector_search.py` and `test_discovery_retrieval.py`: coverage, provenance, limits, and retrieval.
 - `test_grounding_ranking.py` and `test_job_evaluation.py`: quotations, evidence, evaluation, and ranking.
 - `test_search_policy.py`: reasoning settings, general-applicant searches, cohorts, and plan regeneration.
-- `test_storage.py` and `test_ui.py`: cost/cache behavior and rendering/saved-result integration.
+- `test_storage.py`: cost/cache behavior and saved-data integration.
 - `test_web.py`: the complete Django HTTP journey with fake model clients, approvals, stale forms,
   task failures/restarts, bookmarks, exports, backups, legacy import, CSRF, and browser isolation.
 - `test_web_browser.py`: runs the shipped interview event handlers with Node when available,

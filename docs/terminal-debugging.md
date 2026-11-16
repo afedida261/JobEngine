@@ -203,6 +203,14 @@ retained. The shared ledger continues to enforce the existing budget.
 
 Each run contains:
 
+JSON writes use unique temporary files and atomic replacement. Replacement permission/sharing failures receive
+six attempts with 10–160 ms delays (310 ms maximum waiting); no delete-and-rewrite fallback is used.
+An exhausted optional diagnostic write is reported on the console and in `failures.json` as
+`kind=persistence`, with details in `persistence-failures.json` and the manifest. The research workflow
+continues with its actual results, and incomplete diagnostics make the manifest `partial`.
+Required search/evaluation exports and saved candidate state remain strict: an exhausted write fails
+explicitly, and the terminal command exits nonzero. A final-manifest failure is also reported as failure.
+
 | Artifact | Meaning |
 |---|---|
 | `manifest.json`, `invocation.json` | Format version, unique execution ID, command, inputs, times and status |

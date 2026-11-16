@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from jobengine.infrastructure.persistence import atomic_write_json
 from jobengine.models import SavedOnboarding, utc_now
 
 
@@ -98,12 +99,11 @@ class Store:
 
     def save_run(self, identifier: str, payload: dict) -> Path:
         directory = self.root / "runs"
-        directory.mkdir(exist_ok=True)
         # IDs are internally generated; never treat a user filename as a path.
         if not identifier.isalnum():
             raise ValueError("Invalid run ID.")
         target = directory / f"{identifier}.json"
-        target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        atomic_write_json(target, payload)
         return target
 
     def load_run(self, identifier: str) -> dict | None:

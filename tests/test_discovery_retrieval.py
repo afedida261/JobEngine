@@ -13,6 +13,7 @@ def test_search_collects_tool_sources_and_inline_citations():
         "output": [
             {
                 "type": "web_search_call",
+                "status": "completed",
                 "action": {
                     "type": "search",
                     "sources": [{"url": "https://example.com/a", "title": "A"}],
@@ -47,6 +48,7 @@ def test_discovery_rejects_invented_urls_and_deduplicates(case, search_brief):
                     "output": [
                         {
                             "type": "web_search_call",
+                            "status": "completed",
                             "action": {
                                 "sources": [{"url": "https://example.com/job", "title": "Test"}]
                             },
@@ -116,3 +118,25 @@ def test_jsonld_description_and_closure_banner_both_retained():
     assert "Python programming is required" in text
     assert "no longer available" in text
     assert "JSON-LD" in method
+
+
+def test_ignored_search_queries_and_sources_are_not_executed():
+    from jobengine.search.discovery import search_queries
+
+    raw = {
+        "output": [
+            {
+                "type": "web_search_call",
+                "status": "completed",
+                "action": {"query": "done", "sources": []},
+            },
+            {
+                "type": "web_search_call",
+                "status": "searching",
+                "action": {"query": "ignored", "sources": [{"url": "https://example.com/ignored"}]},
+            },
+        ]
+    }
+    assert search_queries(raw) == ["done"]
+    assert search_queries(raw, ignored=True) == ["ignored"]
+    assert search_sources(raw) == []

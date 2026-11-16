@@ -84,17 +84,24 @@ function makeDeck(count) {
   return deck;
 }
 
-function runtime() {
+function runtime({typedLine = null, reducedMotion = false} = {}) {
   const requests = [];
+  const timers = [];
+  const windowEvents = {};
   const context = {
     document: {
-      querySelectorAll: () => [], querySelector: () => null,
+      querySelectorAll: selector => selector === "[data-typewriter]" && typedLine ? [typedLine] : [],
+      querySelector: () => null,
       addEventListener() {}, createElement: () => new Element(),
     },
     window: {
-      addEventListener() {}, getSelection: () => "", scrollTo() {},
-      matchMedia: () => ({matches: false}), location: {assign() {}},
-      setTimeout() { throw new Error("Unexpected repeat poll"); },
+      addEventListener(name, callback) { windowEvents[name] = callback; },
+      getSelection: () => "", scrollTo() {},
+      matchMedia: () => ({matches: reducedMotion}), location: {assign() {}},
+      setTimeout(callback, delay) {
+        if (!typedLine) throw new Error("Unexpected repeat poll");
+        timers.push({callback, delay});
+      },
     },
     FormData: class {
       constructor(form) { this.values = {revision: "1"}; }
@@ -116,7 +123,33 @@ function runtime() {
   };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../jobengine/web/static/jobengine/app.js"), "utf8"), context);
-  return {context, requests};
+  return {context, requests, timers, windowEvents};
+}
+
+function checkResultsTypewriter(reducedMotion) {
+  const line = new Element();
+  const title = "Your search is complete.";
+  line.textContent = title;
+  line.dataset.typeSpeed = "35";
+  const {timers, requests, windowEvents} = runtime({typedLine: line, reducedMotion});
+  if (reducedMotion) {
+    assert.equal(line.textContent, title);
+    assert.equal(timers.length, 0);
+  } else {
+    assert.equal(line.textContent, "");
+    let steps = 0;
+    while (timers.length) {
+      const timer = timers.shift();
+      assert.equal(timer.delay, 35);
+      timer.callback();
+      assert.ok(++steps <= title.length, "The title must finish without looping");
+    }
+    assert.equal(line.textContent, title);
+    assert.equal(line.getAttribute("data-typing"), null);
+  }
+  windowEvents.pageshow();
+  assert.equal(timers.length, 0, "Page restoration must not restart the animation");
+  assert.equal(requests.length, 0);
 }
 
 async function checkSubmission(action) {
@@ -152,5 +185,7 @@ function checkKeyboardWithoutHistoryNavigation() {
   await checkSubmission("answer");
   await checkSubmission("skip");
   checkKeyboardWithoutHistoryNavigation();
-  console.log("PASS: submit, skip, next-question fetch, Ctrl+Enter, and no history navigation.");
+  checkResultsTypewriter(false);
+  checkResultsTypewriter(true);
+  console.log("PASS: interview/navigation handlers and one-shot, reduced-motion-aware results title.");
 })().catch(error => { console.error(error); process.exitCode = 1; });

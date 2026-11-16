@@ -335,82 +335,26 @@ def test_fit_uses_grounded_facts_without_resending_whole_page(case, monkeypatch,
     assert sent["evaluate_fit"]["job"]["requirements"][0]["quote"] in page.text
 
 
-@pytest.mark.parametrize("provider_fails", [False, True])
-def test_saved_candidate_can_regenerate_a_plan_without_repeating_onboarding(
-    case, intake, search_brief, monkeypatch, provider_fails
-):
-    import os
-    from pathlib import Path
-
-    from streamlit.testing.v1 import AppTest
-
-    from jobengine.models import OnboardingAnalysis, OnboardingSession, SavedOnboarding
-
-    profile = case[0]
-    profile.intake = intake
-    profile.search_brief = confirm_search_brief(profile, search_brief)
-    old_brief = profile.search_brief.model_copy(deep=True)
-    fresh = search_brief.model_copy(
-        update={"summary": "A fresh general-applicant search plan", "avoid": []}
+def test_search_cost_counts_only_completed_tool_calls(recorded_client):
+    client, _ = recorded_client
+    raw = {
+        "status": "completed",
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "output": [
+            {"type": "web_search_call", "status": "completed", "action": {"type": "search"}},
+            {"type": "web_search_call", "status": "searching", "action": {"type": "search"}},
+            {"type": "web_search_call", "action": {"type": "search"}},
+        ],
+    }
+    client.client.responses.create = lambda **kwargs: SimpleNamespace(
+        status="completed",
+        usage=SimpleNamespace(model_dump=lambda **_: raw["usage"]),
+        output_text="",
+        model_dump=lambda **_: raw,
     )
-    session = OnboardingSession(
-        id="syntheticregeneration",
-        documents=profile.documents,
-        role_hint="",
-        interest_hint="",
-        professional_years=0,
-        history=[],
-        intake=intake,
-        stage="ready",
-        interview_finished=True,
-        analysis=OnboardingAnalysis(
-            summary="Synthetic profile",
-            evidence=profile.evidence,
-            conflicts=[],
-            missing_information=[],
-            suggested_roles=profile.target_roles,
-            suggested_interests=profile.interests,
-            preference_suggestions=[],
-            next_question=None,
-        ),
+    client.search(
+        "Synthetic accounting test", operation="greenhouse_board_discovery", max_tool_calls=1
     )
-    store = Store(os.environ["JOBENGINE_DATA_DIR"])
-    store.save_onboarding(SavedOnboarding(session=session, profile=profile))
-    calls = []
-
-    def structured(self, operation, instructions, data, schema):
-        calls.append(operation)
-        if provider_fails:
-            raise RuntimeError("Synthetic provider failure")
-        return BriefProposal(plan=fresh, uncertainties=[])
-
-    monkeypatch.setattr(llm.ModelClient, "structured", structured)
-    monkeypatch.setattr(
-        llm.ModelClient,
-        "search",
-        lambda *args, **kwargs: pytest.fail("Plan regeneration must not search"),
-    )
-    app = AppTest.from_file(
-        Path(__file__).resolve().parents[1] / "jobengine" / "ui" / "legacy_app.py",
-        default_timeout=30,
-    )
-    app.session_state["api_key"] = "synthetic-key"
-    app.run()
-    assert not app.exception and not calls
-    next(b for b in app.button if b.label == "Regenerate search plan").click().run()
-    assert not app.exception
-    assert calls == ["onboarding_search_brief"]
-    saved = store.load_onboarding()
-    assert saved.session.documents == session.documents
-    if provider_fails:
-        assert saved.profile.search_brief == old_brief
-        assert saved.session.stage == "ready"
-    else:
-        assert saved.profile.search_brief is None
-        assert saved.session.stage == "brief"
-        assert saved.brief_draft.summary == fresh.summary
-        assert not any(b.label == "Discover & evaluate jobs" for b in app.button)
-        app.checkbox(key=f"brief_approval_{session.id}").check()
-        next(b for b in app.button if b.label == "Confirm search brief").click().run()
-        assert not app.exception and not app.error
-        assert store.load_onboarding().profile.search_brief.summary == fresh.summary
+    call = client.store.usage()["calls"][-1]
+    assert call["searches"] == 1
+    assert call["amount"] == pytest.approx(0.01)

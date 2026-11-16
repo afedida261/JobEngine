@@ -1,0 +1,55 @@
+{% extends 'jobengine/base.html' %}
+{% block content %}
+<section class="results-dashboard" aria-labelledby="results-title">
+  <div class="setup-heading results-heading">
+    <h1 id="results-title" aria-label="Your search is complete."><span class="results-title-reserve" aria-hidden="true">Your search is complete.</span><span data-typewriter data-type-speed="35" aria-hidden="true">Your search is complete.</span></h1>
+  </div>
+  <div class="result-cards">
+    {% for card in cards %}
+    <details class="result-card" data-run-id="{{ card.run_id }}" data-job-position="{{ card.position }}">
+      <summary>
+        <span class="result-card-heading">
+          <span class="result-card-title">{{ card.title }}</span>
+          <span class="result-card-meta">{{ card.company }}{% if card.location %} · {{ card.location }}{% endif %}</span>
+          {% if recorded_demo and card.ranked_job.category == 'needs_review' %}<span class="result-card-status">Needs review</span>{% elif card.show_not_recommended %}<span class="result-card-status">Not recommended</span>{% endif %}
+        </span>
+        <span class="result-card-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="result-card-content">
+        <section>
+          <h2>Requirements</h2>
+          {% if card.requirements %}<ul>{% for requirement in card.requirements %}<li>{{ requirement.text }}</li>{% endfor %}</ul>{% endif %}
+        </section>
+        <section>
+          <h2>Your strengths</h2>
+          {% if card.strengths %}<ul>{% for strength in card.strengths|slice:':3' %}<li>
+            <p>{{ strength.explanation|default:strength.requirement.text }}</p>
+            <ul class="result-card-evidence">{% for evidence in strength.evidence|slice:':2' %}<li>{{ evidence.summary }}</li>{% endfor %}</ul>
+          </li>{% endfor %}</ul>{% endif %}
+        </section>
+        <section>
+          <h2>Your gaps</h2>
+          {% if card.qualification_gaps %}<ul>{% for gap in card.qualification_gaps %}<li>
+            <p>{{ gap.requirement.text }}</p>{% if gap.explanation %}<p class="muted">{{ gap.explanation }}</p>{% endif %}
+          </li>{% endfor %}</ul>{% else %}<p class="muted">No confirmed qualification gaps.</p>{% endif %}
+          {% if card.unresolved_qualifications or card.uncertainties %}
+          <div class="result-card-unresolved">
+            <h3>Not established</h3>
+            <ul>{% for qualification in card.unresolved_qualifications %}<li>
+              <p>{{ qualification.requirement.text }}</p>{% if qualification.explanation %}<p class="muted">{{ qualification.explanation }}</p>{% endif %}
+            </li>{% endfor %}{% for uncertainty in card.uncertainties %}<li>{{ uncertainty }}</li>{% endfor %}</ul>
+          </div>
+          {% endif %}
+        </section>
+        <section>
+          <h2>Original job posting</h2>
+          {% if card.original_url %}<a class="result-card-source" href="{{ card.original_url }}" target="_blank" rel="noopener noreferrer">View original posting ↗</a>{% endif %}
+        </section>
+      </div>
+    </details>
+    {% empty %}
+    <p class="results-empty">No matching opportunities were found in this search.</p>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

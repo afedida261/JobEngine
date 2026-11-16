@@ -17,7 +17,12 @@ from jobengine.infrastructure.storage import BudgetExceeded
 from jobengine.models import Profile
 from jobengine.onboarding.brief import require_confirmed_search_brief
 from jobengine.prompts import PROMPTS
-from jobengine.search.discovery import public_brief, search_queries, search_sources
+from jobengine.search.discovery import (
+    observed_source_url_count,
+    public_brief,
+    search_queries,
+    search_sources,
+)
 from jobengine.search.greenhouse import GreenhouseError, GreenhouseJob, fetch_board_jobs
 from jobengine.search.retrieval import canonical_url
 
@@ -114,6 +119,34 @@ def _record_labels(result, extracted, sources):
             record["employer_labels"].append(claim)
 
 
+def _role_queries(roles: list[str]) -> list[str]:
+    """Build distinct short coverage searches from approved titles."""
+    titles = []
+    for role in roles:
+        role = role.lstrip(" (\t")
+        role = re.split(r"\s+\b(?:or|and)\b\s+|[/,;|()]", role, maxsplit=1, flags=re.IGNORECASE)[0]
+        words = re.findall(r"[\w]+(?:[-'][\w]+)*", role, flags=re.UNICODE)
+        words = [word for word in words if word.casefold() not in {"or", "and"}]
+        if words:
+            titles.append(words[:4])
+    variants = []
+    for words in titles:
+        variants.append(words)
+    queries = []
+    seen = set()
+    for words in variants:
+        role = " ".join(words)
+        key = role.casefold()
+        if key not in seen:
+            seen.add(key)
+            queries.append(
+                f'site:job-boards.greenhouse.io "{role}"'
+                if len(words) > 1
+                else f"site:job-boards.greenhouse.io {role}"
+            )
+    return queries
+
+
 def discover_greenhouse_boards(
     client: ModelClient,
     profile: Profile,
@@ -145,14 +178,27 @@ def discover_greenhouse_boards(
             "board_inspections": max_boards,
         }
     )
+    planned = _role_queries(approved.target_roles)
+    used_queries = set()
+    pending_recovery = None
     context = httpx.Client(trust_env=False) if http_client is None else nullcontext(http_client)
     with context as connection:
         for index in range(max_search_requests):
             if should_stop and should_stop():
                 result.stop_reason = "time_limit"
                 break
+            if pending_recovery:
+                planned_query = pending_recovery
+                result.searches[-1]["recovery"]["status"] = "attempted"
+                pending_recovery = None
+            else:
+                planned_query = next((q for q in planned if q.casefold() not in used_queries), None)
+            if not planned_query:
+                result.stop_reason = "distinct_queries_exhausted"
+                break
+            used_queries.add(planned_query.casefold())
             focus = {
-                "query": approved.search_queries[index % len(approved.search_queries)],
+                "query": planned_query,
                 "sector": approved.sectors[index % len(approved.sectors)].name
                 if approved.sectors
                 else None,
@@ -162,7 +208,14 @@ def discover_greenhouse_boards(
             prompt = PROMPTS["discover_greenhouse_boards"].format(
                 brief=json.dumps(brief, ensure_ascii=False), focus=json.dumps(focus)
             )
-            attempt = {"prompt": prompt, "status": "failed", "sources": [], "queries": []}
+            attempt = {
+                "prompt": prompt,
+                "planned_query": planned_query,
+                "status": "failed",
+                "sources": [],
+                "queries": [],
+                "ignored_queries": [],
+            }
             result.searches.append(attempt)
             result.search_requests += 1
             try:
@@ -170,8 +223,12 @@ def discover_greenhouse_boards(
                     prompt, operation="greenhouse_board_discovery", max_tool_calls=1
                 )
                 sources = search_sources(response["raw"])
+                attempt["observed_url_entries"] = observed_source_url_count(response["raw"])
                 attempt.update(
-                    status="ok", sources=sources, queries=search_queries(response["raw"])
+                    status="ok",
+                    sources=sources,
+                    queries=search_queries(response["raw"]),
+                    ignored_queries=search_queries(response["raw"], ignored=True),
                 )
             except Exception as exc:
                 # Provider exceptions can contain credentials/content: retain their
@@ -181,6 +238,35 @@ def discover_greenhouse_boards(
                     result.stop_reason = "budget_limit"
                     break
                 continue
+            if not sources:
+                role_words = re.findall(r"[\w]+(?:[-'][\w]+)*", planned_query.split(" ", 1)[-1])
+                shorter = [
+                    f'site:job-boards.greenhouse.io "{" ".join(role_words[-length:])}"'
+                    if length > 1
+                    else f"site:job-boards.greenhouse.io {role_words[-1]}"
+                    for length in range(len(role_words) - 1, 0, -1)
+                ]
+                recovery = next((q for q in shorter if q.casefold() not in used_queries), None)
+                if index + 1 >= max_search_requests:
+                    attempt["recovery"] = {"status": "skipped", "reason": "search_request_limit"}
+                elif not recovery:
+                    attempt["recovery"] = {
+                        "status": "skipped",
+                        "reason": "no_simpler_distinct_query",
+                    }
+                else:
+                    pending_recovery = recovery
+                    attempt["recovery"] = {"status": "planned", "query": recovery}
+                attempt["outcome"] = (
+                    "no_sources"
+                    if not attempt["observed_url_entries"]
+                    else "source_url_extraction_empty"
+                )
+                result.warnings.append(
+                    f"Greenhouse search {attempt['outcome']}: {planned_query}; see recovery details in diagnostics."
+                )
+            else:
+                attempt["outcome"] = "sources_returned"
             eligible = []
             for source in sources:
                 try:
@@ -243,6 +329,8 @@ def discover_greenhouse_boards(
             if result.boards_inspected >= max_boards:
                 result.stop_reason = "board_inspection_limit"
                 break
+    if pending_recovery and result.searches[-1].get("recovery", {}).get("status") == "planned":
+        result.searches[-1]["recovery"] = {"status": "skipped", "reason": result.stop_reason}
     for token, record in result.candidates.items():
         labels = record["employer_labels"]
         if record["status"] == "verified" and labels:

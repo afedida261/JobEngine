@@ -25,7 +25,7 @@ def search_sources(raw: dict) -> list[dict[str, str]]:
     sources: dict[str, dict[str, str]] = {}
     for output in raw.get("output", []):
         candidates = []
-        if output.get("type") == "web_search_call":
+        if output.get("type") == "web_search_call" and output.get("status") == "completed":
             candidates.extend(output.get("action", {}).get("sources", []) or [])
         for content in output.get("content", []):
             candidates.extend(
@@ -41,6 +41,23 @@ def search_sources(raw: dict) -> list[dict[str, str]]:
             except ValueError:
                 continue
     return list(sources.values())
+
+
+def observed_source_url_count(raw: dict) -> int:
+    """Count URL-bearing source and citation entries before validation or deduplication."""
+    count = 0
+    for output in raw.get("output", []):
+        if output.get("type") == "web_search_call" and output.get("status") == "completed":
+            count += sum(
+                bool(s.get("url")) for s in (output.get("action", {}).get("sources") or [])
+            )
+        for content in output.get("content", []):
+            count += sum(
+                bool(a.get("url"))
+                for a in content.get("annotations", [])
+                if a.get("type") == "url_citation"
+            )
+    return count
 
 
 def public_brief(profile: Profile) -> dict:
@@ -64,10 +81,12 @@ def public_brief(profile: Profile) -> dict:
     }
 
 
-def search_queries(raw: dict) -> list[str]:
+def search_queries(raw: dict, *, ignored: bool = False) -> list[str]:
     queries = []
     for output in raw.get("output", []):
         if output.get("type") != "web_search_call":
+            continue
+        if (output.get("status") != "completed") != ignored:
             continue
         action = output.get("action") or {}
         values = action.get("queries") or ([action["query"]] if action.get("query") else [])

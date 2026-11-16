@@ -1,5 +1,6 @@
 """Greenhouse → real hybrid scorer → existing evaluation, with offline providers."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -12,6 +13,25 @@ from jobengine.onboarding.brief import confirm_search_brief
 from jobengine.search import pipeline
 from jobengine.terminal.artifacts import Artifacts, read_json, write_json
 from jobengine.terminal.cli import main, parser
+
+
+def test_locked_diagnostic_job_does_not_abort_actual_search_or_final_export(setup, monkeypatch):
+    s = setup
+    replace = Path.replace
+
+    def locked_result(source, target):
+        if Path(target).parent.name == "jobs" and read_json(source).get("result"):
+            raise PermissionError("Synthetic Windows diagnostic reader lock")
+        return replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", locked_result)
+    result = run(s, limit=1, max_assessments=1)
+    assert result.search.stop_reason == "shortlist_target_reached"
+    assert len(result.jobs) == len(result.inspected_jobs) == 1
+    assert s.client.store.load_run(result.id) == result.model_dump(mode="json")
+    assert s.trace.persistence_failures
+    assert read_json(s.trace.path / "manifest.json")["status"] == "partial"
+    assert not any(e["stage"] == "search" and e["outcome"] == "failed" for e in s.trace.events)
 
 
 @pytest.fixture
@@ -210,6 +230,7 @@ def dynamic(setup):
                 "output": [
                     {
                         "type": "web_search_call",
+                        "status": "completed",
                         "action": {
                             "queries": ["site:job-boards.greenhouse.io software New York"],
                             "sources": s.state.discovery_sources,
@@ -312,6 +333,13 @@ def test_dynamic_empty_and_failures_are_distinct_and_never_assessed(dynamic, sce
     details = read_json(s.trace.path / "search/greenhouse-discovery.json")
     assert bool(details["boards"]) == (scenario == "empty_boards")
     assert "Stop: " + stop in result.search.summary
+    if scenario == "empty_search":
+        assert details["searches"][0]["outcome"] == "no_sources"
+        assert details["searches"][0]["recovery"]["status"] == "skipped"
+        assert any(
+            e["stage"] == "board_discovery" and e["outcome"] == "no_sources" for e in s.trace.events
+        )
+        assert "1 searches returned no URL entries" in result.search.summary
     if scenario != "empty_boards":
         assert result.search.warnings
     assert len(s.state.http) == (2 if scenario in {"empty_boards", "failed_verification"} else 0)

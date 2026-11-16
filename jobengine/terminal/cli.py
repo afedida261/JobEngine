@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from jobengine.grounding import validate_evidence
 from jobengine.infrastructure.diagnostics import observe
 from jobengine.infrastructure.llm import DEFAULT_INTERVIEW_MODEL, DEFAULT_SEARCH_MODEL, ModelClient
+from jobengine.infrastructure.persistence import PersistenceError
 from jobengine.infrastructure.resumes import read_resume
 from jobengine.infrastructure.storage import Store
 from jobengine.models import (
@@ -659,7 +660,9 @@ def main(argv=None, *, client_factory=make_client, input_fn=input, output=print)
                                 progress=lambda message: output("[search] " + message),
                                 **options,
                             )
-                            trace.save("search/run.json", run.model_dump(mode="json"))
+                            trace.save(
+                                "search/run.json", run.model_dump(mode="json"), required=True
+                            )
                             trace.output("[search] " + run.search.summary)
                             status = (
                                 "partial"
@@ -694,12 +697,24 @@ def main(argv=None, *, client_factory=make_client, input_fn=input, output=print)
                                         "Saved page requested_url must match the discovered job URL."
                                     )
                             result = evaluate(get_client(), profile, item, page=page)
-                            trace.save("search/evaluation.json", result.model_dump(mode="json"))
+                            trace.save(
+                                "search/evaluation.json",
+                                result.model_dump(mode="json"),
+                                required=True,
+                            )
                             status = "completed"
             return 0
         except (Exception, KeyboardInterrupt) as exc:
-            trace("cli", "failed", error_type=type(exc).__name__, reason=str(exc), retried=False)
+            trace(
+                "persist" if isinstance(exc, PersistenceError) else "cli",
+                "failed",
+                error_type=type(exc).__name__,
+                reason=str(exc),
+                retried=False,
+            )
             output(f"[error] {type(exc).__name__}: {trace.redact(str(exc))}")
             return 130 if isinstance(exc, KeyboardInterrupt) else 1
         finally:
-            trace.finish(status)
+            final_status = trace.finish(status)
+            if final_status == "failed" and status != "failed":
+                return 1

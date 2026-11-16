@@ -7,6 +7,8 @@ import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+from django.urls import reverse
+
 from jobengine.infrastructure.llm import DEFAULT_INTERVIEW_MODEL, DEFAULT_SEARCH_MODEL, ModelClient
 from jobengine.onboarding.brief import propose_search_brief, require_confirmed_search_brief
 from jobengine.onboarding.guided import continue_guided
@@ -126,6 +128,8 @@ def execute(workspace_id, identifier):
         if task["operation"] in {"intake", "answer", "skip"}:
             record.session = prepare_interview(workspace, identifier, session, task["operation"])
             workspace.save(record, identifier)
+            if record.session.interview_finished:
+                workspace.update_task(identifier, destination=reverse("results"))
         elif task["operation"] == "plan":
             client = get_client(workspace.store)
             workspace.update_task(

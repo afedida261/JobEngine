@@ -39,6 +39,7 @@ class FakeSearch:
                 "output": [
                     {
                         "type": "web_search_call",
+                        "status": "completed",
                         "action": {
                             "queries": ["site:job-boards.greenhouse.io applicant work"],
                             "sources": batch,
@@ -194,6 +195,14 @@ def test_dedup_preserves_every_url_and_employer_label_without_company_quota(appr
     duplicate = source(
         "org0", "Organization Zero", host="boards.greenhouse.io", path="org0/jobs/10"
     )
+    from jobengine.models import SearchBriefDraft
+
+    draft = SearchBriefDraft.model_validate(
+        approved.search_brief.model_dump(include=set(SearchBriefDraft.model_fields))
+    )
+    draft.target_roles = ["Software engineer", "Search engineer"]
+    approved.target_roles = draft.target_roles
+    approved.search_brief = confirm_search_brief(approved, draft)
     fake = FakeSearch([first, [duplicate, first[0]]])
     http, requests, _ = api
     result = discover_greenhouse_boards(fake, approved, max_search_requests=2, http_client=http)
@@ -272,14 +281,22 @@ def test_unrelated_greenhouse_source_omitted_by_normalizer_is_not_a_verified_emp
 
 
 def test_search_failures_count_against_limit_and_do_not_erase_partial_results(approved, api):
+    from jobengine.models import SearchBriefDraft
+
+    draft = SearchBriefDraft.model_validate(
+        approved.search_brief.model_dump(include=set(SearchBriefDraft.model_fields))
+    )
+    draft.target_roles = ["Software engineer", "Search engineer"]
+    approved.target_roles = draft.target_roles
+    approved.search_brief = confirm_search_brief(approved, draft)
     fake = FakeSearch([RuntimeError("private provider response"), [source("clinic", "Clinic")], []])
     http, requests, _ = api
     result = discover_greenhouse_boards(fake, approved, max_search_requests=3, http_client=http)
-    assert result.search_requests == 3 and requests == ["clinic"]
+    assert result.search_requests == 2 and requests == ["clinic"]
     assert result.boards == {"clinic": "Clinic"}
     assert result.searches[0]["error"] == "Web discovery failed (RuntimeError)."
     assert "private provider response" not in str(result)
-    assert "No supported" in result.searches[2]["warning"]
+    assert result.stop_reason == "distinct_queries_exhausted"
 
 
 @pytest.mark.parametrize(
@@ -349,3 +366,68 @@ def test_limits_validated_before_io(approved, argument, value):
 
 def test_new_operations_use_existing_search_model_configuration():
     assert {"greenhouse_board_discovery", "normalize_greenhouse_employers"} <= SEARCH_OPERATIONS
+
+
+def test_empty_search_recovers_with_shorter_distinct_role_and_records_outcome(approved, api):
+    from jobengine.models import SearchBriefDraft
+
+    draft = SearchBriefDraft.model_validate(
+        approved.search_brief.model_dump(include=set(SearchBriefDraft.model_fields))
+    )
+    draft.target_roles = ["Senior Clinical Nurse / LPN", "Radiology Specialist"]
+    approved.target_roles = draft.target_roles
+    approved.search_brief = confirm_search_brief(approved, draft)
+    fake = FakeSearch([[], [source("clinic", "Clinic")], []])
+    result = discover_greenhouse_boards(fake, approved, max_search_requests=3, http_client=api[0])
+    assert [s["planned_query"] for s in result.searches] == [
+        'site:job-boards.greenhouse.io "Senior Clinical Nurse"',
+        'site:job-boards.greenhouse.io "Clinical Nurse"',
+        'site:job-boards.greenhouse.io "Radiology Specialist"',
+    ]
+    assert result.searches[0]["outcome"] == "no_sources"
+    assert result.searches[0]["recovery"]["status"] == "attempted"
+    assert "recovery" not in result.searches[1]
+    assert result.searches[2]["recovery"]["reason"] == "search_request_limit"
+
+
+def test_invalid_source_url_is_distinct_from_no_source(approved, api):
+    fake = FakeSearch([[{"url": "javascript:bad", "title": "Bad"}]])
+    result = discover_greenhouse_boards(fake, approved, max_search_requests=1, http_client=api[0])
+    assert result.searches[0]["observed_url_entries"] == 1
+    assert result.searches[0]["outcome"] == "source_url_extraction_empty"
+
+
+def test_success_does_not_trigger_shortened_role_search(approved, api):
+    from jobengine.models import SearchBriefDraft
+
+    draft = SearchBriefDraft.model_validate(
+        approved.search_brief.model_dump(include=set(SearchBriefDraft.model_fields))
+    )
+    draft.target_roles = ["Software engineer"]
+    approved.target_roles = draft.target_roles
+    approved.search_brief = confirm_search_brief(approved, draft)
+    fake = FakeSearch([[source("success", "Success")]])
+    result = discover_greenhouse_boards(fake, approved, http_client=api[0])
+    assert len(result.searches) == 1
+    assert result.stop_reason == "distinct_queries_exhausted"
+    assert "recovery" not in result.searches[0]
+
+
+@pytest.mark.parametrize(
+    "role,query",
+    [
+        ("Nurse OR LPN", "site:job-boards.greenhouse.io Nurse"),
+        ("(RN) Registered Nurse", "site:job-boards.greenhouse.io RN"),
+        ("Chef / Baker", "site:job-boards.greenhouse.io Chef"),
+        ("Teacher, Tutor", "site:job-boards.greenhouse.io Teacher"),
+        (
+            "Senior Applied Research Software Engineer",
+            'site:job-boards.greenhouse.io "Senior Applied Research Software"',
+        ),
+        ("Ingeniera de software", 'site:job-boards.greenhouse.io "Ingeniera de software"'),
+    ],
+)
+def test_simple_queries_from_arbitrary_approved_roles(role, query):
+    from jobengine.search.greenhouse_discovery import _role_queries
+
+    assert _role_queries([role]) == [query]

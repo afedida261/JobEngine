@@ -8,15 +8,10 @@ Distinguish requirements, preferences, and uncertainties. Be concise; do not inv
 """
 
 PROMPTS = {
-    "discover_greenhouse_boards": """Discover Greenhouse-hosted career boards and individual postings across this applicant's approved plan.
-Search broadly for relevant work, related titles, interests, sectors and geographic constraints.
-Use site:job-boards.greenhouse.io and site:boards.greenhouse.io searches. Find postings and employers
-directly; do not start with a fixed list of companies or limit each sector to a few employers.
-Use the focus as a starting angle, while retaining the whole brief. Consider permitted remote work
-from the selected areas; remote never implies permission to relocate or work from any location.
-Return actual source URLs with source titles identifying employers where available. Do not invent
-board tokens, infer that an employer uses Greenhouse, or construct URLs from employer names.
-Prefer new employers over repeatedly citing the same board. These are discovery leads, not fit decisions.
+    "discover_greenhouse_boards": """Find Greenhouse-hosted career boards and postings using exactly one web search.
+Issue the planned query exactly as written, without adding terms, operators, or extra searches.
+Return actual source URLs and source titles identifying employers where available. Do not invent URLs.
+These are discovery leads; eligibility and qualifications are assessed later.
 APPROVED APPLICANT BRIEF: {brief}
 SEARCH FOCUS: {focus}""",
     "normalize_greenhouse_employers": """Identify potential employers from the supplied Greenhouse search-source titles.

@@ -4,21 +4,22 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from collections import Counter
 from pathlib import Path
 
+from jobengine.infrastructure.persistence import (
+    PersistenceError,
+    atomic_write_json,
+    atomic_write_text,
+)
 from jobengine.models import utc_now
 
 
 def write_json(path, value):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(path)
-    path.chmod(0o600)
+    atomic_write_json(path, value)
 
 
 def read_json(path):
@@ -52,6 +53,8 @@ class Artifacts:
         self.receipts = set()
         self.events, self.failures, self.jobs = [], [], {}
         self.call_id = None
+        self._lock = threading.RLock()
+        self.persistence_failures = {}
         self.manifest = dict(
             format_version=1,
             run_id=self.id,
@@ -60,7 +63,7 @@ class Artifacts:
             started_at=utc_now(),
             status="running",
         )
-        self.save("manifest.json", self.manifest)
+        self.save("manifest.json", self.manifest, required=True)
 
     def redact(self, value):
         if isinstance(value, dict):
@@ -91,10 +94,48 @@ class Artifacts:
             return re.sub(r"\bsk-[A-Za-z0-9_-]{8,}", "[REDACTED]", value)
         return value
 
-    def save(self, name, value):
-        write_json(self.path / name, self.redact(value))
+    def _persistence_failure(self, name, exc):
+        key = str(name)
+        if key in self.persistence_failures:
+            self.persistence_failures[key]["occurrences"] += 1
+            return
+        record = dict(
+            kind="persistence",
+            stage="persist",
+            outcome="failed",
+            at=utc_now(),
+            path=key,
+            error_type=type(exc).__name__,
+            reason=f"Could not persist {key}; actual research results are unchanged.",
+            winerror=getattr(exc, "winerror", None),
+            occurrences=1,
+        )
+        self.persistence_failures[key] = record
+        self.failures.append(record)
+        self.output(f"[persistence] {key}: {type(exc).__name__}; diagnostic output is incomplete.")
+
+    def save(self, name, value, *, required=False):
+        with self._lock:
+            try:
+                write_json(self.path / name, self.redact(value))
+            except PersistenceError as exc:
+                self._persistence_failure(name, exc)
+                if required:
+                    raise
+                return False
+            return True
+
+    def _save_text(self, name, value):
+        try:
+            atomic_write_text(self.path / name, self.redact(value))
+        except PersistenceError as exc:
+            self._persistence_failure(name, exc)
 
     def __call__(self, stage, outcome, **details):
+        with self._lock:
+            self._record_event(stage, outcome, **details)
+
+    def _record_event(self, stage, outcome, **details):
         details = self.redact(details)
         if stage == "greenhouse":
             if outcome == "discovery":
@@ -125,12 +166,14 @@ class Artifacts:
                 for row in details["rows"]:
                     jid = job_id(row["item"])
                     if jid in self.jobs:
-                        self.jobs[jid]["priority"] = {
+                        priority = {
                             key: value
                             for key, value in row.items()
                             if key not in {"item", "page", "evaluation"}
                         }
-                        self.save(f"search/jobs/{jid}.json", self.jobs[jid])
+                        if self.jobs[jid].get("priority") != priority:
+                            self.jobs[jid]["priority"] = priority
+                            self.save(f"search/jobs/{jid}.json", self.jobs[jid])
         if details.get("ledger_receipt"):
             self.receipts.add(details["ledger_receipt"])
         item = details.get("job") or details.get("item")
@@ -148,8 +191,11 @@ class Artifacts:
         )
         self.events.append(event)
         self.save(f"events/{event['sequence']:04d}-{stage}-{outcome}.json", event)
-        with (self.path / "events.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+        try:
+            with (self.path / "events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self._persistence_failure("events.jsonl", exc)
         if jid:
             job = self.jobs.setdefault(
                 jid,
@@ -190,7 +236,9 @@ class Artifacts:
             self.save(f"search/jobs/{jid}.json", job)
         if outcome in {"failed", "rejected", "repair_requested"}:
             kind = (
-                "retrieval"
+                "persistence"
+                if stage == "persist"
+                else "retrieval"
                 if stage in {"retrieve", "http"}
                 else (
                     "model_output_validation"
@@ -225,6 +273,10 @@ class Artifacts:
             self.call_id = None
 
     def finish(self, status):
+        with self._lock:
+            return self._finish(status)
+
+    def _finish(self, status):
         for job in self.jobs.values():
             if not job["assessed"]:
                 job["assessment_status"] = "not assessed"
@@ -263,17 +315,31 @@ class Artifacts:
         )
         self.save("usage.json", usage)
         self.save("failures.json", self.failures)
-        self.save("summary.json", summary)
-        self.manifest.update(status=status, finished_at=utc_now())
-        self.save("manifest.json", self.manifest)
         text = "\n".join(f"{key}: {value}" for key, value in summary.items())
-        text += f"\nStatus: {status}\nArtifacts: {self.path.resolve()}\n"
-        (self.path / "summary.txt").write_text(text, encoding="utf-8")
         results = "\n".join(
             f"{j['job_id']} | {j['discovery']['url']} | "
             f"{j.get('result', {}).get('category', 'unverified')} | {j['assessment_status']} | "
             + "; ".join(j.get("result", {}).get("reasons", [j.get("skip_reason", "")]))
             for j in jobs
         )
-        (self.path / "search/results.txt").write_text(results, encoding="utf-8")
+        self._save_text("search/results.txt", results)
+        summary["failure_events_by_kind"] = dict(Counter(f["kind"] for f in self.failures))
+        summary["diagnostic_persistence_failures"] = len(self.persistence_failures)
+        self.save("summary.json", summary)
+        self.save("persistence-failures.json", list(self.persistence_failures.values()))
+        status = "partial" if self.persistence_failures and status == "completed" else status
+        text += f"\nStatus: {status}\nArtifacts: {self.path.resolve()}\n"
+        self._save_text("summary.txt", text)
+        status = "partial" if self.persistence_failures and status == "completed" else status
+        self.manifest.update(
+            status=status,
+            finished_at=utc_now(),
+            persistence_failures=list(self.persistence_failures.values()),
+        )
+        manifest_saved = self.save("manifest.json", self.manifest)
+        if not manifest_saved:
+            failed_text = text.replace(f"\nStatus: {status}\n", "\nStatus: failed\n")
+            self._save_text("summary.txt", failed_text)
+            text = failed_text
         self.output(text)
+        return status if manifest_saved else "failed"

@@ -4,9 +4,10 @@
   <div class="setup-heading">
     <h1 aria-label="Start with the essentials"><span data-typewriter aria-hidden="true">Start with the essentials</span></h1>
     <p aria-label="Tell us a bit about yourself"><span data-typewriter aria-hidden="true">Tell us a bit about yourself</span></p>
+    {% if recorded_demo_available %}<a class="demo-start-button" href="{% url 'demo_start' %}">View saved demo {% icon 'arrow' %}</a>{% endif %}
   </div>
-  <form method="post" action="{% url 'start' %}" enctype="multipart/form-data" class="setup-form" data-busy-form>
-    {% csrf_token %}{{ form.non_field_errors }}
+  <form method="{% if recorded_demo %}get{% else %}post{% endif %}" action="{% if recorded_demo %}{% url 'demo_interview' %}{% else %}{% url 'start' %}{% endif %}" enctype="multipart/form-data" class="setup-form" data-busy-form>
+    {% if not recorded_demo %}{% csrf_token %}{% endif %}{{ form.non_field_errors }}
     <div class="setup-basics form-grid">
       {% include 'jobengine/field.html' with field=form.full_name %}
       <div class="field"><label for="{{ form.school.id_for_label }}">School</label>
@@ -55,8 +56,8 @@
       {% include 'jobengine/field.html' with field=form.start_mode %}
       <div data-start-date>{% include 'jobengine/field.html' with field=form.start_date %}</div>
     </section>
-    <div class="setup-submit"><button class="button primary" type="submit">Start my interview {% icon 'arrow' %}</button></div>
+    <div class="setup-submit">{% if recorded_demo %}<a class="button primary" href="{% url 'demo_interview' %}">Start my interview {% icon 'arrow' %}</a>{% else %}<button class="button primary" type="submit">Start my interview {% icon 'arrow' %}</button>{% endif %}</div>
   </form>
-  <footer class="setup-footer"><a href="{% url 'settings' %}">Development Page</a>{% if jane_demo %}<form method="post" action="{% url 'start' %}" data-jane-demo data-busy-form>{% csrf_token %}<button class="demo-start-button" name="demo" value="jane" type="submit">Try Jane Doe {% icon 'arrow' %}</button></form>{{ jane_demo|json_script:'jane-demo-data' }}{% endif %}</footer>
+  {% if not recorded_demo %}<footer class="setup-footer"><a href="{% url 'settings' %}">Development Page</a></footer>{% endif %}
 </section>
 {% endblock %}

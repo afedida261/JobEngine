@@ -25,6 +25,8 @@ from jobengine.onboarding.interview import finish_interview
 from jobengine.onboarding.policy import MAX_QUESTIONS
 from jobengine.onboarding.preferences import intake_constraints
 from jobengine.web import forms, tasks
+from jobengine.web.demo import load_recorded_demo, select_demo_cards
+from jobengine.web.presentation import select_dashboard_cards
 from jobengine.web.workspace import Workspace
 
 STAGES = {"intake": 0, "interview": 1, "profile": 2, "brief": 3, "ready": 4}
@@ -134,27 +136,43 @@ def overview(request):
     history = workspace.runs()
     if not history and record.session.stage in {"intake", "interview"}:
         return redirect(next_url(record))
-    run = (workspace.run(record.last_run_id) or history[0]) if history else None
-    rows = [
-        row
-        for row in (job_rows(workspace, run) if run else [])
-        if row["job"].category in {"strong", "weaker", "needs_review"}
-    ]
+    return redirect("results")
+
+
+@require_GET
+def results(request):
+    workspace = workspace_for(request)
+    record = workspace.current()
+    if not record:
+        return redirect("start")
+    active = tasks.recover_task(workspace, workspace.task())
+    if active:
+        return redirect("activity", identifier=active["id"])
+    history = workspace.runs()
+    if not history and record.session.stage in {"intake", "interview"}:
+        return redirect(next_url(record))
+    identifier = request.GET.get("run")
+    if identifier:
+        run = workspace.run(identifier)
+        if not run:
+            raise Http404
+    else:
+        run = (workspace.run(record.last_run_id) or history[0]) if history else None
     return page(
         request,
-        "overview",
-        title="Your dashboard",
+        "results_dashboard",
+        nav="opportunities",
+        title="Your search is complete.",
         run=run,
-        rows=rows[:3],
-        suggested_count=len(rows),
-        needs_review=record.session.stage != "ready",
+        cards=select_dashboard_cards(run) if run else [],
+        results_page=True,
     )
 
 
 @require_http_methods(["GET", "POST"])
 def start(request):
     workspace = workspace_for(request)
-    if workspace.current():
+    if request.method == "POST" and workspace.current():
         return redirect(next_url(workspace.current()))
     demo_values = jane_demo_values(request)
     demo_requested = request.method == "POST" and request.POST.get("demo") == "jane"
@@ -181,6 +199,126 @@ def start(request):
         schools=forms.SCHOOLS,
         areas=forms.AREAS,
         jane_demo=demo_values,
+        recorded_demo_available=bool(local_library_allowed(request) and load_recorded_demo()),
+    )
+
+
+def recorded_demo_for(request):
+    if not local_library_allowed(request):
+        raise Http404
+    demo = load_recorded_demo()
+    if not demo:
+        raise Http404
+    return demo
+
+
+def demo_page(request, template, demo, **context):
+    """Render existing components without reading or mutating the applicant workspace."""
+    return render(
+        request,
+        f"jobengine/{template}.html",
+        {
+            "page_title": "John Doe · Saved demo",
+            "recorded_demo": True,
+            "record": demo.onboarding,
+            "dashboard_available": True,
+            "focus_mode": template in {"start", "interview"},
+            **context,
+        },
+    )
+
+
+@require_GET
+def demo_start(request):
+    demo = recorded_demo_for(request)
+    session = demo.onboarding.session
+    general = session.general_information
+    degree, _, program = (general.qualification if general else "").partition(" / ")
+    values = {
+        **forms.PreferencesForm.initial_for(session.intake),
+        "full_name": general.full_name if general else "",
+        "school": general.school if general else "",
+        "degree": degree.lower(),
+        "program": program,
+        "professional_years": session.professional_years,
+        "interests": session.interest_hint,
+        "background": session.documents[0].text if session.documents else "",
+    }
+    form = forms.IntakeForm(initial=values)
+    for field in form.fields.values():
+        field.disabled = True
+    return demo_page(
+        request,
+        "start",
+        demo,
+        form=form,
+        landing_page=True,
+        schools=forms.SCHOOLS,
+        areas=forms.AREAS,
+    )
+
+
+@require_GET
+def demo_interview(request):
+    demo = recorded_demo_for(request)
+    try:
+        index = int(request.GET.get("question", "1"))
+    except ValueError:
+        raise Http404 from None
+    if not 1 <= index <= len(demo.exchanges):
+        raise Http404
+    exchange = demo.exchanges[index - 1]
+    return demo_page(
+        request,
+        "interview",
+        demo,
+        question=exchange,
+        answer=exchange.answer,
+        recorded_interview=True,
+        demo_next=reverse("demo_results"),
+        demo_question_number=index,
+        demo_question_count=len(demo.exchanges),
+    )
+
+
+@require_GET
+def demo_profile(request):
+    demo = recorded_demo_for(request)
+    return demo_page(
+        request,
+        "profile",
+        demo,
+        nav="profile",
+        editing=False,
+        profile_evidence=demo.onboarding.profile.evidence,
+    )
+
+
+@require_GET
+def demo_plan(request):
+    demo = recorded_demo_for(request)
+    return demo_page(
+        request,
+        "plan",
+        demo,
+        nav="plan",
+        ready=True,
+        editing=False,
+        draft=demo.onboarding.profile.search_brief,
+    )
+
+
+@require_GET
+def demo_results(request):
+    demo = recorded_demo_for(request)
+    return demo_page(
+        request,
+        "results_dashboard",
+        demo,
+        nav="opportunities",
+        run=demo.run,
+        cards=select_demo_cards(demo.run),
+        results_page=True,
     )
 
 
@@ -206,7 +344,7 @@ def interview(request):
     if record.session.stage == "intake" and record.session.intake is None:
         return redirect("preferences")
     if record.session.stage not in {"intake", "interview"}:
-        return redirect("overview")
+        return redirect("results")
     pending = tasks.recover_task(workspace, workspace.task())
     if pending and pending["operation"] == "intake":
         return redirect("activity", identifier=pending["id"])
@@ -217,7 +355,7 @@ def interview(request):
             if action == "finish" and record.session.analysis.evidence:
                 record.session = finish_interview(record.session)
                 workspace.save(record)
-                return redirect("overview")
+                return redirect("results")
             if record.session.stage == "intake":
                 return launch(request, workspace, record, "intake", "interview")
             answer = request.POST.get("answer", "").strip()
@@ -424,7 +562,7 @@ def plan(request):
             if request.POST["action"] == "search":
                 if record.session.stage != "ready" or not ready:
                     raise ValueError("Review and approve your current search plan first.")
-                return launch(request, workspace, record, "search", "overview")
+                return launch(request, workspace, record, "search", "results")
             record.profile.search_brief = None
             record.brief_draft = None
             record.last_run_id = None
@@ -505,7 +643,7 @@ def plan(request):
             record.session.stage = "ready"
             record = workspace.save(record)
             if request.POST.get("discover") == "1":
-                return launch(request, workspace, record, "search", "overview")
+                return launch(request, workspace, record, "search", "results")
             messages.success(
                 request, "Your search plan is approved. You're ready to discover opportunities."
             )

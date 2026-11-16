@@ -189,6 +189,7 @@ def test_company_urls_require_search_provenance(case, search_brief):
                     "output": [
                         {
                             "type": "web_search_call",
+                            "status": "completed",
                             "action": {
                                 "sources": [{"url": "https://real.example/", "title": "Synthetic"}]
                             },
@@ -344,6 +345,7 @@ def test_zero_experience_search_does_not_keep_obviously_senior_candidates(case, 
                     "output": [
                         {
                             "type": "web_search_call",
+                            "status": "completed",
                             "action": {
                                 "sources": [
                                     {
@@ -386,6 +388,7 @@ def test_unsupported_homepage_can_use_an_actual_sourced_company_subpage(case, se
                     "output": [
                         {
                             "type": "web_search_call",
+                            "status": "completed",
                             "action": {
                                 "sources": [
                                     {"url": "https://real.example/about", "title": "Synthetic"}

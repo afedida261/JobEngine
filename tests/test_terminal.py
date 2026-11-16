@@ -1,6 +1,7 @@
 """Terminal orchestration exercises real services with isolated files and fake providers."""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -23,6 +24,28 @@ from jobengine.onboarding.interview import start_onboarding
 from jobengine.search import pipeline
 from jobengine.terminal.artifacts import Artifacts, read_json, write_json
 from jobengine.terminal.cli import main
+
+
+def test_required_search_export_failure_is_reported_as_persistence(
+    case, search_brief, terminal, monkeypatch
+):
+    profile = case[0].model_copy(deep=True)
+    profile.search_brief = confirm_search_brief(profile, search_brief)
+    write_json(terminal.root / "candidates/synthetic/profile.json", profile.model_dump(mode="json"))
+    replace = Path.replace
+
+    def denied_export(source, target):
+        if Path(target).name == "run.json":
+            raise PermissionError("Synthetic permanent required-export lock")
+        return replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", denied_export)
+    assert terminal.invoke("search", "synthetic", "--limit", "1") == 1
+    run_path = terminal.runs("search")[-1]
+    assert read_json(run_path / "manifest.json")["status"] == "failed"
+    assert any(f["kind"] == "persistence" for f in read_json(run_path / "failures.json"))
+    assert not (run_path / "search/run.json").exists()
+    assert list((terminal.data / "runs").glob("*.json"))  # Actual results still saved by Store.
 
 
 class FakeClient:
@@ -101,7 +124,11 @@ class FakeClient:
             "text": "Synthetic sources",
             "raw": {
                 "output": [
-                    {"type": "web_search_call", "action": {"type": "search", "sources": sources}}
+                    {
+                        "type": "web_search_call",
+                        "status": "completed",
+                        "action": {"type": "search", "sources": sources},
+                    }
                 ]
             },
         }

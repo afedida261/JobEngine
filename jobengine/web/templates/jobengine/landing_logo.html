@@ -1,4 +1,4 @@
 {% load static %}
-<a class="landing-brand" href="{% url 'overview' %}" aria-label="JobEngine home">
+<a class="landing-brand" href="{% if recorded_demo %}{% url 'demo_start' %}{% else %}{% url 'overview' %}{% endif %}" aria-label="JobEngine home">
   <img src="{% static 'jobengine/brand-logo.svg' %}" width="1658" height="348" alt="JobEngine">
 </a>

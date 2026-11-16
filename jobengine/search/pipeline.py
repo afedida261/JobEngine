@@ -598,8 +598,25 @@ def _run_greenhouse_search(
                     search.warnings.append(record["error"])
                     emit("board_discovery", "failed", reason=record["error"], board=record)
                 for attempt in discovery.searches:
+                    if attempt.get("outcome") in {"no_sources", "source_url_extraction_empty"}:
+                        emit(
+                            "board_discovery",
+                            attempt["outcome"],
+                            query=attempt["planned_query"],
+                            recovery=attempt["recovery"],
+                        )
                     search.sources.extend(s for s in attempt["sources"] if s not in search.sources)
-                discovery_summary = f"Verified {len(boards)} usable Greenhouse boards from {discovery.boards_inspected} inspections. "
+                no_sources = sum(s.get("outcome") == "no_sources" for s in discovery.searches)
+                extraction_empty = sum(
+                    s.get("outcome") == "source_url_extraction_empty" for s in discovery.searches
+                )
+                discovery_summary = (
+                    f"Greenhouse discovery: {no_sources} searches returned no URL entries; "
+                    f"{extraction_empty} had URL entries but none passed extraction; "
+                    f"{len(discovery.rejected_sources)} extracted sources had unsupported board URLs; "
+                    f"{len(failed_boards)} board inspections failed. "
+                    f"Verified {len(boards)} usable Greenhouse boards from {discovery.boards_inspected} inspections. "
+                )
                 if discovery.stop_reason in {"budget_limit", "time_limit"}:
                     search.stop_reason = discovery.stop_reason
                     search.warnings.append(

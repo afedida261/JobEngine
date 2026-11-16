@@ -4,7 +4,13 @@ from jobengine.web import views
 
 urlpatterns = [
     path("", views.overview, name="overview"),
+    path("results/", views.results, name="results"),
     path("start/", views.start, name="start"),
+    path("demo/", views.demo_start, name="demo_start"),
+    path("demo/profile/", views.demo_profile, name="demo_profile"),
+    path("demo/plan/", views.demo_plan, name="demo_plan"),
+    path("demo/interview/", views.demo_interview, name="demo_interview"),
+    path("demo/results/", views.demo_results, name="demo_results"),
     path("conversation/", views.interview, name="interview"),
     path("profile/", views.profile, name="profile"),
     path("preferences/", views.preferences, name="preferences"),
